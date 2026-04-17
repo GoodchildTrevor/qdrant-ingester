@@ -1,6 +1,7 @@
 import logging
 import secrets
 import asyncio
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Security
@@ -36,10 +37,10 @@ def health():
 
 def require_api_key(api_key: str | None = Security(api_key_header)) -> None:
     settings = get_settings()
-    secret = settings.api_key.get_secret_value() if settings.api_key else None
+    secret = settings.api_key.get_secret_value() if settings.api_key else ""
     if not secret:
         raise HTTPException(status_code=500, detail="API key not configured")
-    if not api_key or api_key != secret:
+    if not api_key or not secrets.compare_digest(api_key, secret):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
@@ -54,6 +55,10 @@ def resolve_path(settings: Settings, path_str: str) -> Path:
     return candidate
 
 
+def require_allowed_collection(collection: str, settings: Settings) -> None:
+    if collection not in settings.allowed_collections:
+        raise HTTPException(status_code=403, detail="Collection is not allowed")
+
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(
     request: IngestRequest,
@@ -64,6 +69,7 @@ async def ingest(
     Returns partial success metadata if some upsert batches ultimately fail.
     """
     settings = get_settings()
+    require_allowed_collection(request.collection, settings)
     client = get_qdrant_client()
     dense_model = get_dense_model()
     sparse_model = get_sparse_model()
@@ -194,6 +200,29 @@ def _scan_files_bounded(root: Path, limit: int = 200_000) -> set[Path]:
             raise RuntimeError(f"sync scan limit exceeded: {limit}")
     return out
 
+_sync_lock = asyncio.Lock()
+_sync_cache: dict[str, object] = {"ts": 0.0, "paths": set()}
+SYNC_CACHE_TTL_SECONDS = 30
+SYNC_SCAN_TIMEOUT_SECONDS = 60
+
+async def get_current_paths_cached(root: Path) -> set[Path]:
+    now = time.time()
+    if now - float(_sync_cache["ts"]) <= SYNC_CACHE_TTL_SECONDS:
+        return set(_sync_cache["paths"])  # defensive copy
+
+    async with _sync_lock:
+        now = time.time()
+        if now - float(_sync_cache["ts"]) <= SYNC_CACHE_TTL_SECONDS:
+            return set(_sync_cache["paths"])
+
+        paths = await asyncio.wait_for(
+            asyncio.to_thread(_scan_files_bounded, root, 200_000),
+            timeout=SYNC_SCAN_TIMEOUT_SECONDS,
+        )
+        _sync_cache["ts"] = time.time()
+        _sync_cache["paths"] = set(paths)
+        return set(paths)
+
 
 @app.post("/sync", response_model=SyncResponse)
 async def sync(
@@ -207,6 +236,7 @@ async def sync(
     Returns new file paths and count of deleted chunks.
     """
     settings = get_settings()
+    require_allowed_collection(request.collection, settings)
     client = get_qdrant_client()
 
     # Server-side source of truth for sync: derive current paths from ingest_root only.
@@ -214,7 +244,7 @@ async def sync(
     if not getattr(settings, "ingest_root", None):
         raise HTTPException(status_code=500, detail="INGEST_ROOT must be configured for sync")
     allowed_root = settings.ingest_root
-    current_paths = await asyncio.to_thread(_scan_files_bounded, allowed_root, 200_000)
+    current_paths = await get_current_paths_cached(allowed_root)
 
     try:
         new_paths, deleted_paths = await sync_file_paths(

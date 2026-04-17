@@ -96,6 +96,22 @@ class Settings(BaseSettings):
     dense_vector_config: str = "dense"
     sparse_vector_config: str = "sparse"
 
+    allowed_collections: tuple[str, ...] = pydantic_field(
+        default=("documents",),
+        description="Collections allowed for ingest/sync operations",
+    )
+
+    @field_validator("allowed_collections")
+    @classmethod
+    def _validate_allowed_collections(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        if not v:
+            raise ValueError("ALLOWED_COLLECTIONS must contain at least one collection")
+        import re
+        bad = [c for c in v if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", c)]
+        if bad:
+            raise ValueError(f"Invalid collection names: {bad}")
+        return v
+
     @model_validator(mode="after")
     def _validate_required_secrets(self):
         # Ensure the service API key is configured and non-empty.
