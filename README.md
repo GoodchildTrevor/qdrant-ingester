@@ -1,31 +1,31 @@
 # qdrant-ingester
 
-FastAPI microservice that receives document file paths, sends them to document-chunker for parsing/chunking, embeds chunk lemmas (dense + sparse) and upserts resulting points into Qdrant.
+FastAPI service that ingests documents (by path), sends them to a document-chunker for chunking, embeds chunk lemmas (dense + sparse), and upserts points into Qdrant.
 
-## Highlights (new)
-- Partial success reporting for /ingest: API returns status ("success", "partial", "failed") and batch-level failure info.
-- Idempotent upserts: deterministic point IDs derived from (file_path, chunk_index) to prevent duplicates on retries.
-- Per-batch retries with exponential backoff and collection of final failed batches.
-- Streaming upload to document-chunker to avoid reading whole files into memory.
-- Max upload size enforcement (configurable via env): returns 413 if exceeded.
-- Clear error handling: upstream errors (document-chunker) return 502; embedding or full pipeline failures return 500.
+## Quick start
 
-## Architecture
-
+1. Copy example env:
+```bash
+cp .env.example .env
 ```
-  caller
-    │
-    ├── POST /ingest  ──►  document-chunker /chunk  ──►  embed  ──►  Qdrant (upsert)
-    └── POST /sync    ──►  diff filesystem vs Qdrant  ──►  delete orphans
+
+2. Fill required variables in .env (see "Environment" below).
+
+3. Run with Docker Compose (recommended):
+```bash
+docker compose up --build
+```
+
+Or run locally:
+```bash
+python -m uvicorn qdrant_ingester.main:app --host 0.0.0.0 --port 8002
 ```
 
 ## API
 
-### POST /ingest
-
-Full pipeline for a single file: send file to document-chunker → embed lemmas → upsert into Qdrant.
-
-Request (JSON):
+- POST /ingest
+  - Full pipeline: chunk → embed → upsert.
+  - Request (JSON):
 ```json
 {
   "collection": "my_collection",
@@ -34,127 +34,83 @@ Request (JSON):
   "overlap": 1
 }
 ```
-- chunk_size and overlap are optional and default to env values.
+  - Behavior:
+    - Returns 413 if file exceeds configured MAX_FILE_SIZE_MB.
+    - Returns 502 for upstream document-chunker failures.
+    - Returns 500 for pipeline/internal failures (embedding, upsert errors).
+    - Authentication: X-API-Key header required (see ENV).
+    - Collection is validated against configured allowed_collections.
 
-Behavior notes:
-- If file size > MAX_FILE_SIZE_MB the endpoint returns 413 Payload Too Large.
-- If document-chunker is unreachable or returns non-2xx, /ingest returns 502 (upstream).
-- If embedding fails, /ingest returns 500 (pipeline failure).
-- Upserts are idempotent: point ids are deterministic (sha1 of "file_path:chunk_index").
-- Upsert is performed in batches with retries; batches that still fail after retries are reported in the response rather than aborting the whole operation.
+- POST /sync
+  - Reconciles filesystem under INGEST_ROOT with what’s stored in Qdrant:
+    - Detects new files for ingest.
+    - Deletes orphaned chunks.
+  - The endpoint is protected and bounded:
+    - Filesystem scan runs in a background thread, is timeout-protected and cached to avoid I/O storms.
+    - On overload/timeout the endpoint returns 503 (retry later).
 
-Responses:
+- GET /health
+  - Returns {"status": "ok"}.
 
-Success:
-```json
-{
-  "collection": "my_collection",
-  "file_name": "report.pdf",
-  "status": "success",
-  "chunks_total": 42,
-  "chunks_upserted": 42,
-  "chunks_failed": 0,
-  "failed_batches": []
-}
-```
+## Responses
 
-Partial success (some batches failed after retries):
-```json
-{
-  "collection": "my_collection",
-  "file_name": "report.pdf",
-  "status": "partial",
-  "chunks_total": 50,
-  "chunks_upserted": 42,
-  "chunks_failed": 8,
-  "failed_batches": [
-    {
-      "batch_index": 3,
-      "attempts": 3,
-      "error": "HTTPError: 503 Service Unavailable",
-      "size": 4,
-      "ids": ["<id1>", "<id2>", "<id3>", "<id4>"]
-    }
-  ]
-}
-```
+- /ingest returns structured status with partial/failure details:
+  - status: "success" | "partial" | "failed"
+  - chunks_total, chunks_upserted, chunks_failed, failed_batches (batch-level errors)
 
-Failed (no points accepted):
-```json
-{
-  "collection": "my_collection",
-  "file_name": "report.pdf",
-  "status": "failed",
-  "chunks_total": 50,
-  "chunks_upserted": 0,
-  "chunks_failed": 50,
-  "failed_batches": [ ... ]
-}
-```
+## Security & hardening notes
 
-### POST /sync
+- API key:
+  - Service expects a configured API_KEY and validates requests with a constant-time comparison.
+  - If not set the service refuses to start (configuration validation).
+- Qdrant:
+  - Qdrant client is created with QDRANT_API_KEY when configured.
+  - docker-compose enforces providing QDRANT_API_KEY for the qdrant container.
+- Errors:
+  - Internal exception details are logged server-side only; API responses use generic error messages to avoid information leakage.
+- Collection safety:
+  - Allowed collection names are validated and only collections in allowed_collections are accepted for ingest/sync to prevent accidental data deletion.
 
-Compare a list of current file paths against what is stored in Qdrant; returns new files and deletes orphaned chunks.
+## Environment (important / required)
 
-Request:
-```json
-{
-  "collection": "my_collection",
-  "current_file_paths": ["/data/documents/a.pdf", "/data/documents/b.docx"]
-}
-```
+Minimum required:
+- DOCUMENT_CHUNKER_URL (required) — document-chunker /chunk endpoint
+- QDRANT_HOST (required) — Qdrant hostname
+- API_KEY (required) — shared API key in X-API-Key header
+- QDRANT_API_KEY (required for docker-compose + recommended for production)
 
-Response:
-```json
-{
-  "collection": "my_collection",
-  "new_files": ["/data/documents/b.docx"],
-  "deleted_chunks": 17
-}
-```
+Common optional (defaults shown):
+- QDRANT_PORT=6333
+- DENSE_MODEL_NAME=sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+- SPARSE_MODEL_NAME=Qdrant/bm25
+- BATCH_SIZE=16
+- UPSERT_BATCH_SIZE=16
+- SCROLL_LIMIT=1000
+- CHUNK_SIZE=512
+- OVERLAP=1
+- INGEST_ROOT=/data
+- MAX_FILE_SIZE_MB=50
+- APP_PORT=8002
+- ALLOWED_COLLECTIONS=("documents",) — validated names only
 
-### GET /health
-Returns:
-```json
-{"status": "ok"}
-```
+Note: docker-compose has been updated to require API_KEY, DOCUMENT_CHUNKER_URL, QDRANT_HOST and QDRANT_API_KEY; starting compose without these will error and prevents insecure defaults.
 
-## Run
+## Implementation notes (operators)
 
-```bash
-cp .env.example .env
-# set DOCUMENT_CHUNKER_URL, QDRANT_HOST, API_KEY, INGEST_ROOT (and other env vars as needed)
-docker compose up --build
-```
+- Idempotency: point IDs deterministic (derived from file_path and chunk index) to avoid duplicates on retries.
+- Upserts: done in batches with per-batch retries and backoff; final failed batches are reported to the client.
+- Filesystem sync:
+  - Scans are bounded, run in a thread, cached for a short TTL and timeboxed to avoid blocking the event loop or causing excessive I/O.
+  - On heavy load the sync endpoint degrades gracefully with 503 responses.
+- Logging: full exception traces are logged server-side for diagnostics; API responses are intentionally generic.
 
-Or run locally:
-```bash
-python -m uvicorn qdrant_ingester.main:app --port 8002
-```
+## Troubleshooting
 
-## Environment variables
+- If docker compose interpolation errors occur, ensure required env vars are present in your environment or .env file.
+- To test authentication, call a protected endpoint with header:
+  X-API-Key: <API_KEY>
 
-`DOCUMENT_CHUNKER_URL`, `QDRANT_HOST`, and `API_KEY` are required.
+## Contributing / Development
 
-| Variable | Default | Description |
-|---|---|---|
-| DOCUMENT_CHUNKER_URL | *(required)* | URL of the document-chunker `/chunk` endpoint |
-| QDRANT_HOST | *(required)* | Qdrant hostname |
-| QDRANT_PORT | 6333 | Qdrant port |
-| API_KEY | *(required)* | Shared API key expected in `X-API-Key` header |
-| INGEST_ROOT | /data | Base directory allowed for ingest/sync file access |
-| DENSE_MODEL_NAME | sentence-transformers/paraphrase-multilingual-pmnet-base-v2 | fastembed dense model |
-| SPARSE_MODEL_NAME | Qdrant/bm25 | fastembed sparse (BM25) model |
-| BATCH_SIZE | 16 | Embedding batch size |
-| UPSERT_BATCH_SIZE | 16 | Qdrant upsert batch size |
-| SCROLL_LIMIT | 1000 | Qdrant scroll page size |
-| CHUNK_SIZE | 512 | Default chunk_size forwarded to document-chunker |
-| OVERLAP | 1 | Default overlap forwarded to document-chunker |
-| MAX_FILE_SIZE_MB | 50 | Maximum allowed upload file size (MB) |
-| APP_PORT | 8002 | Host port (docker-compose only) |
-
-## Implementation details (notes for operators)
-- Idempotency: deterministic sha1(file_path:chunk_index) point ids prevent duplicates on re-ingest.
-- Retries: upsert is retried per batch with exponential backoff; final failed batches are included in the API response so callers can inspect and re-run if desired.
-- Streaming: the service streams files to document-chunker (file descriptor passed to httpx) to avoid reading large files fully into memory.
-- Status semantics: `partial` means some batches failed after retries; `failed` means no points were accepted. The service only returns 500 on pipeline-level failures (embedding or internal unhandled errors). Document-chunker failures are surfaced as 502 to indicate upstream issues.
+- Run tests and linters in your environment before opening PRs.
+- Pay attention to configuration validation; the app validates required secrets on startup.
