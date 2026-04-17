@@ -33,10 +33,8 @@ async def ingest(
     request: IngestRequest,
 ):
     """
-    Full pipeline for a single file:
-    1. Send file to document-chunker -> get chunks
-    2. Embed chunk lemmas (dense + sparse)
-    3. Upsert points into Qdrant
+    Full pipeline for a single file: chunk -> embed -> upsert.
+    Returns partial success metadata if some upsert batches ultimately fail.
     """
     settings = get_settings()
     client = get_qdrant_client()
@@ -50,6 +48,14 @@ async def ingest(
     if not file_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
 
+    # Enforce maximum file size
+    try:
+        size_mb = file_path.stat().st_size / (1024 * 1024)
+    except Exception:
+        size_mb = None
+    if size_mb is not None and size_mb > getattr(settings, "max_file_size_mb", 0):
+        raise HTTPException(status_code=413, detail=f"File too large ({size_mb:.1f} MB)")
+
     # Step 1 — chunk
     try:
         chunk_resp = await fetch_chunks(
@@ -60,6 +66,7 @@ async def ingest(
         )
     except Exception as e:
         logger.error("Chunker call failed for %s: %s", file_path, e)
+        # treat chunker as upstream; return 502 so caller can retry
         raise HTTPException(status_code=502, detail=f"document-chunker error: {e}")
 
     if not chunk_resp.chunks:
@@ -67,7 +74,11 @@ async def ingest(
         return IngestResponse(
             collection=request.collection,
             file_name=chunk_resp.file_name,
+            status="success",
+            chunks_total=0,
             chunks_upserted=0,
+            chunks_failed=0,
+            failed_batches=[],
         )
 
     # Step 2 — embed
@@ -81,9 +92,10 @@ async def ingest(
         )
     except Exception as e:
         logger.error("Embedding failed for %s: %s", file_path, e)
+        # Embedding considered a pipeline-level failure
         raise HTTPException(status_code=500, detail=f"Embedding error: {e}")
 
-    # Step 3 — upsert
+    # Step 3 — upsert (idempotent, with retries). upsert_data now returns metrics dict.
     chunks_as_dicts = [
         {"raw": ch.raw, "lemmas": ch.lemmas, "meta": ch.meta}
         for ch in chunk_resp.chunks
@@ -96,7 +108,7 @@ async def ingest(
         "modification_date": chunk_resp.modification_date,
     }
     try:
-        upserted = await upsert_data(
+        metrics = await upsert_data(
             client=client,
             collection_name=request.collection,
             dense_vector_config=settings.dense_vector_config,
@@ -109,12 +121,24 @@ async def ingest(
         )
     except Exception as e:
         logger.error("Upsert failed for %s: %s", file_path, e)
+        # Treat as pipeline failure only if upsert raised unexpectedly
         raise HTTPException(status_code=500, detail=f"Qdrant upsert error: {e}")
+
+    # Build response: partial if any failed batches remain
+    status_str = "success"
+    if metrics.get("chunks_failed", 0) > 0:
+        status_str = "partial"
+    if metrics.get("chunks_upserted", 0) == 0 and metrics.get("chunks_failed", 0) > 0:
+        status_str = "failed"
 
     return IngestResponse(
         collection=request.collection,
         file_name=chunk_resp.file_name,
-        chunks_upserted=upserted,
+        status=status_str,
+        chunks_total=metrics.get("chunks_total", 0),
+        chunks_upserted=metrics.get("chunks_upserted", 0),
+        chunks_failed=metrics.get("chunks_failed", 0),
+        failed_batches=metrics.get("failed_batches", []),
     )
 
 

@@ -18,16 +18,17 @@ async def fetch_chunks(
     """
     Send a file to document-chunker and return the parsed ChunkResponse.
     Raises httpx.HTTPStatusError on non-2xx responses.
-    """
-    with open(file_path, "rb") as fh:
-        file_bytes = fh.read()
 
+    Stream the file by passing the open file descriptor to httpx to avoid
+    loading the whole file into memory.
+    """
     filename = file_path.name
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            chunker_url,
-            data={"chunk_size": chunk_size, "overlap": overlap},
-            files={"file": (filename, file_bytes)},
-        )
+        with open(file_path, "rb") as fh:
+            response = await client.post(
+                chunker_url,
+                data={"chunk_size": chunk_size, "overlap": overlap},
+                files={"file": (filename, fh)},
+            )
     response.raise_for_status()
     return ChunkResponse.model_validate(response.json())

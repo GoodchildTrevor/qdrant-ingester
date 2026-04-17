@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +9,6 @@ from qdrant_client.models import PointStruct
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 logger = logging.getLogger(__name__)
-
 
 async def upsert_data(
     client: AsyncQdrantClient,
@@ -22,13 +20,33 @@ async def upsert_data(
     base_payload: dict[str, Any],
     chunks: list[dict[str, Any]],
     batch_size: int = 16,
-) -> int:
+    max_attempts: int = 3,
+    initial_backoff: float = 1.0,
+) -> dict[str, Any]:
     """
-    Upsert points into Qdrant in batches.
-    Returns number of upserted points.
+    Upsert points into Qdrant in batches with:
+    - deterministic point ids derived from (file_path, chunk_index) for idempotency
+    - per-batch retries with exponential backoff
+    - collection of final failed batches and simple error metrics
+
+    Returns a dict:
+    {
+        "chunks_total": int,
+        "chunks_upserted": int,
+        "chunks_failed": int,
+        "failed_batches": list[dict]
+    }
     """
+    import hashlib
+
+    total_chunks = len(chunks)
+
     def point_generator():
+        file_path = base_payload.get("file_path", "")
         for i, chunk in enumerate(chunks):
+            # deterministic id: sha1(file_path + ":" + index)
+            id_str = f"{file_path}:{i}"
+            pid = hashlib.sha1(id_str.encode()).hexdigest()
             vector_dict: dict[str, Any] = {
                 dense_vector_config: dense_embeddings[i],
                 sparse_vector_config: sparse_embeddings[i].as_object(),
@@ -44,23 +62,65 @@ async def upsert_data(
                 "chunk_tokens": meta.get("tokens"),
             }
             payload = {k: v for k, v in payload.items() if v is not None}
-            yield PointStruct(id=str(uuid.uuid4()), vector=vector_dict, payload=payload)
+            yield PointStruct(id=pid, vector=vector_dict, payload=payload)
 
     upserted = 0
-    for batch in chunked(point_generator(), batch_size):
-        try:
-            await client.upsert(
-                collection_name=collection_name,
-                points=list(batch),
-                wait=True,
-            )
-            upserted += len(batch)
-            await asyncio.sleep(0.1)
-        except Exception as e:
-            logger.error("Upsert batch failed: %s", e)
-    logger.info("Upserted %d points into '%s'", upserted, collection_name)
-    return upserted
+    failed = 0
+    failed_batches: list[dict[str, Any]] = []
 
+    for batch_index, batch in enumerate(chunked(point_generator(), batch_size)):
+        batch_list = list(batch)
+        attempt = 0
+        backoff = initial_backoff
+        success = False
+        while attempt < max_attempts and not success:
+            attempt += 1
+            try:
+                await client.upsert(
+                    collection_name=collection_name,
+                    points=batch_list,
+                    wait=True,
+                )
+                upserted += len(batch_list)
+                success = True
+                # small pause to avoid hammering
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.warning(
+                    "Upsert batch %d failed (attempt %d/%d): %s",
+                    batch_index,
+                    attempt,
+                    max_attempts,
+                    e,
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
+                else:
+                    failed += len(batch_list)
+                    failed_batches.append(
+                        {
+                            "batch_index": batch_index,
+                            "attempts": attempt,
+                            "error": str(e),
+                            "size": len(batch_list),
+                            "ids": [p.id for p in batch_list],
+                        }
+                    )
+                    # proceed to next batch
+    logger.info(
+        "Upsert summary for '%s': total=%d upserted=%d failed=%d",
+        collection_name,
+        total_chunks,
+        upserted,
+        failed,
+    )
+    return {
+        "chunks_total": total_chunks,
+        "chunks_upserted": upserted,
+        "chunks_failed": failed,
+        "failed_batches": failed_batches,
+    }
 
 async def sync_file_paths(
     client: AsyncQdrantClient,
@@ -104,7 +164,6 @@ async def sync_file_paths(
     deleted = db_str - current_str
     logger.info("%d new, %d deleted for collection '%s'", len(new_paths), len(deleted), collection)
     return new_paths, deleted
-
 
 async def delete_orphaned_chunks(
     client: AsyncQdrantClient,
