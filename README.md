@@ -123,7 +123,7 @@ Returns:
 
 ```bash
 cp .env.example .env
-# set DOCUMENT_CHUNKER_URL and QDRANT_HOST (and other env vars as needed)
+# set DOCUMENT_CHUNKER_URL, QDRANT_HOST, API_KEY, INGEST_ROOT (and other env vars as needed)
 docker compose up --build
 ```
 
@@ -134,13 +134,15 @@ python -m uvicorn qdrant_ingester.main:app --port 8002
 
 ## Environment variables
 
-`DOCUMENT_CHUNKER_URL` and `QDRANT_HOST` are required.
+`DOCUMENT_CHUNKER_URL`, `QDRANT_HOST`, and `API_KEY` are required.
 
 | Variable | Default | Description |
 |---|---|---|
 | DOCUMENT_CHUNKER_URL | *(required)* | URL of the document-chunker `/chunk` endpoint |
 | QDRANT_HOST | *(required)* | Qdrant hostname |
 | QDRANT_PORT | 6333 | Qdrant port |
+| API_KEY | *(required)* | Shared API key expected in `X-API-Key` header |
+| INGEST_ROOT | /data | Base directory allowed for ingest/sync file access |
 | DENSE_MODEL_NAME | sentence-transformers/paraphrase-multilingual-pmnet-base-v2 | fastembed dense model |
 | SPARSE_MODEL_NAME | Qdrant/bm25 | fastembed sparse (BM25) model |
 | BATCH_SIZE | 16 | Embedding batch size |

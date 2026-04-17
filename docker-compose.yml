@@ -7,6 +7,8 @@ services:
       DOCUMENT_CHUNKER_URL: ${DOCUMENT_CHUNKER_URL}
       QDRANT_HOST: ${QDRANT_HOST}
       QDRANT_PORT: ${QDRANT_PORT:-6333}
+      API_KEY: ${API_KEY}
+      INGEST_ROOT: ${INGEST_ROOT:-/data}
       DENSE_MODEL_NAME: ${DENSE_MODEL_NAME:-sentence-transformers/paraphrase-multilingual-mpnet-base-v2}
       SPARSE_MODEL_NAME: ${SPARSE_MODEL_NAME:-Qdrant/bm25}
       BATCH_SIZE: ${BATCH_SIZE:-16}

@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.security import APIKeyHeader
 
 from qdrant_ingester.config import (
@@ -9,6 +9,7 @@ from qdrant_ingester.config import (
     get_qdrant_client,
     get_dense_model,
     get_sparse_model,
+    Settings,
 )
 from qdrant_ingester.schemas import (
     IngestRequest, IngestResponse,
@@ -22,6 +23,7 @@ logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="qdrant-ingester", version="0.1.0")
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 # Simple API-key protection: if Settings.api_key is empty, auth is disabled.
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -36,10 +38,29 @@ def health():
     return {"status": "ok"}
 
 
+def require_api_key(api_key: str | None = Security(api_key_header)) -> None:
+    settings = get_settings()
+    if not settings.api_key:
+        raise HTTPException(status_code=500, detail="API key not configured")
+    if api_key != settings.api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def resolve_path(settings: Settings, path_str: str) -> Path:
+    root = Path(settings.ingest_root).resolve()
+    candidate = Path(path_str)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    candidate = candidate.resolve()
+    if not candidate.is_relative_to(root):
+        raise HTTPException(status_code=403, detail="File path not allowed")
+    return candidate
+
+
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest(
     request: IngestRequest,
-    _ : None = Depends(require_api_key),
+    _: None = Depends(require_api_key),
 ):
     """
     Full pipeline for a single file: chunk -> embed -> upsert.
