@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+import json
 
 import httpx
 
@@ -17,18 +18,21 @@ async def fetch_chunks(
 ) -> ChunkResponse:
     """
     Send a file to document-chunker and return the parsed ChunkResponse.
-    Raises httpx.HTTPStatusError on non-2xx responses.
 
-    Stream the file by passing the open file descriptor to httpx to avoid
-    loading the whole file into memory.
+    Stream the file by using httpx.AsyncClient.stream and passing an open
+    file object to files= so the request body is not built entirely in memory.
+    Raises httpx.HTTPStatusError on non-2xx responses.
     """
     filename = file_path.name
     async with httpx.AsyncClient(timeout=timeout) as client:
         with open(file_path, "rb") as fh:
-            response = await client.post(
+            # Use client.stream to avoid buffering the entire response or request
+            async with client.stream(
+                "POST",
                 chunker_url,
                 data={"chunk_size": chunk_size, "overlap": overlap},
-                files={"file": (filename, fh)},
-            )
-    response.raise_for_status()
-    return ChunkResponse.model_validate(response.json())
+                files={"file": (filename, fh, "application/octet-stream")},
+            ) as response:
+                response.raise_for_status()
+                raw = await response.aread()
+    return ChunkResponse.model_validate(json.loads(raw.decode("utf-8")))

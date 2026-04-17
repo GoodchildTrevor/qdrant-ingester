@@ -45,6 +45,10 @@ class Settings(BaseSettings):
         default=1,
         description="overlap forwarded to document-chunker",
     )
+    max_file_size_mb: int = pydantic_field(
+        default=0,
+        description="Maximum allowed file size for ingest in megabytes (0 disables check)",
+    )
 
     # Vector config names used in Qdrant collection schema
     dense_vector_config: str = "dense"

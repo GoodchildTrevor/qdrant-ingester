@@ -75,6 +75,8 @@ async def ingest(
             collection=request.collection,
             file_name=chunk_resp.file_name,
             status="success",
+            partial=False,
+            message=None,
             chunks_total=0,
             chunks_upserted=0,
             chunks_failed=0,
@@ -131,14 +133,22 @@ async def ingest(
     if metrics.get("chunks_upserted", 0) == 0 and metrics.get("chunks_failed", 0) > 0:
         status_str = "failed"
 
+    failed = metrics.get("chunks_failed", 0)
+    failed_batches = metrics.get("failed_batches", [])
+    partial_flag = failed > 0 and metrics.get("chunks_upserted", 0) > 0
+    message = None
+    if failed:
+        message = f"{failed} chunks failed in {len(failed_batches)} failed batch(es)"
     return IngestResponse(
         collection=request.collection,
         file_name=chunk_resp.file_name,
         status=status_str,
+        partial=partial_flag,
+        message=message,
         chunks_total=metrics.get("chunks_total", 0),
         chunks_upserted=metrics.get("chunks_upserted", 0),
-        chunks_failed=metrics.get("chunks_failed", 0),
-        failed_batches=metrics.get("failed_batches", []),
+        chunks_failed=failed,
+        failed_batches=failed_batches,
     )
 
 

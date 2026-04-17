@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, List, Dict, Optional
 from pydantic import BaseModel
 
 # ---- Incoming from document-chunker ----------------------------------------
@@ -27,10 +27,12 @@ class IngestResponse(BaseModel):
     collection: str
     file_name: str
     status: str = "success"  # "success", "partial", "failed"
+    partial: bool = False
+    message: Optional[str] = None
     chunks_total: int = 0
     chunks_upserted: int
     chunks_failed: int = 0
-    failed_batches: list[dict[str, Any]] = []
+    failed_batches: List[Dict[str, Any]] = []
 
 class SyncRequest(BaseModel):
     collection: str
