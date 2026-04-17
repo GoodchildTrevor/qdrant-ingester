@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="qdrant-ingester", version="0.1.0")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
+# Simple API-key protection: if Settings.api_key is empty, auth is disabled.
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+def require_api_key(key: str = Security(api_key_header)):
+    s = get_settings()
+    if s.api_key and key != s.api_key:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
 
 @app.get("/health")
 def health():
@@ -66,8 +73,14 @@ async def ingest(
 
     chunk_size = request.chunk_size or settings.chunk_size
     overlap = request.overlap or settings.overlap
-    file_path = resolve_path(settings, request.file_path)
-
+    # Restrict ingest to an allowed root if configured to prevent LFI/exfiltration
+    if getattr(settings, "ingest_root", ""):
+        allowed_root = Path(settings.ingest_root).resolve()
+        file_path = (allowed_root / request.file_path).resolve()
+        if allowed_root not in file_path.parents and file_path != allowed_root:
+            raise HTTPException(status_code=403, detail="path not allowed")
+    else:
+        file_path = Path(request.file_path)
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
 
@@ -178,7 +191,7 @@ async def ingest(
 @app.post("/sync", response_model=SyncResponse)
 async def sync(
     request: SyncRequest,
-    _: None = Depends(require_api_key),
+    _ : None = Depends(require_api_key),
 ):
     """
     Synchronize Qdrant collection against current filesystem state:
@@ -189,10 +202,16 @@ async def sync(
     settings = get_settings()
     client = get_qdrant_client()
 
-    if not request.current_file_paths:
-        raise HTTPException(status_code=400, detail="current_file_paths cannot be empty")
-
-    current_paths = {resolve_path(settings, p) for p in request.current_file_paths}
+    # Do not trust empty client-supplied lists. If empty and an ingest_root is configured,
+    # derive current paths from the server filesystem. Otherwise require the client to supply.
+    if request.current_file_paths:
+        current_paths = {Path(p) for p in request.current_file_paths}
+    else:
+        if getattr(settings, "ingest_root", ""):
+            allowed_root = Path(settings.ingest_root).resolve()
+            current_paths = {p for p in allowed_root.rglob("*") if p.is_file()}
+        else:
+            raise HTTPException(status_code=400, detail="current_file_paths required for delete")
 
     try:
         new_paths, deleted_paths = await sync_file_paths(
