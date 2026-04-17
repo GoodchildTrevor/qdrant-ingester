@@ -3,8 +3,6 @@ services:
     build: .
     container_name: qdrant_ingester
     restart: unless-stopped
-    ports:
-      - "${APP_PORT:-8002}:8002"
     environment:
       DOCUMENT_CHUNKER_URL: ${DOCUMENT_CHUNKER_URL}
       QDRANT_HOST: ${QDRANT_HOST}
@@ -27,7 +25,7 @@ services:
       start_period: 20s
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:1.17.1
     container_name: qdrant
     restart: unless-stopped
     ports:
