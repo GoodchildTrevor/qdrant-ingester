@@ -47,21 +47,13 @@ class Settings(BaseSettings):
         description="overlap forwarded to document-chunker",
     )
     max_file_size_mb: int = pydantic_field(
-        default=50,
+        default=200,
         ge=1,
         description="Maximum allowed file size for ingest in megabytes",
     )
     disable_file_size_limit: bool = pydantic_field(
         default=False,
         description="If true, disables file size checks",
-    )
-    ingest_root: str = pydantic_field(
-        default="/data",
-        description="Base directory allowed for ingest/sync file access",
-    )
-    api_key: str = pydantic_field(
-        default="",
-        description="Shared API key required on requests",
     )
 
     # Security / deployment
