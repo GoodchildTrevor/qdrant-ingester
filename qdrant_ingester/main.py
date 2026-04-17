@@ -36,10 +36,10 @@ def health():
 
 def require_api_key(api_key: str | None = Security(api_key_header)) -> None:
     settings = get_settings()
-    if not settings.api_key:
+    secret = settings.api_key.get_secret_value() if settings.api_key else None
+    if not secret:
         raise HTTPException(status_code=500, detail="API key not configured")
-    expected = settings.api_key.get_secret_value()
-    if not api_key or not secrets.compare_digest(api_key, expected):
+    if not api_key or api_key != secret:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
