@@ -244,7 +244,13 @@ async def sync(
     if not getattr(settings, "ingest_root", None):
         raise HTTPException(status_code=500, detail="INGEST_ROOT must be configured for sync")
     allowed_root = settings.ingest_root
-    current_paths = await get_current_paths_cached(allowed_root)
+    try:
+        current_paths = await get_current_paths_cached(allowed_root)
+    except (TimeoutError, asyncio.TimeoutError, RuntimeError):
+        raise HTTPException(
+            status_code=503,
+            detail="Filesystem scan is overloaded; retry later",
+        )
 
     try:
         new_paths, deleted_paths = await sync_file_paths(
