@@ -68,6 +68,8 @@ python -m uvicorn qdrant_ingester.main:app --host 0.0.0.0 --port 8002
   - docker-compose enforces providing QDRANT_API_KEY for the qdrant container.
 - Errors:
   - Internal exception details are logged server-side only; API responses use generic error messages to avoid information leakage.
+  - Set `DEBUG_ERRORS=true` (non-prod only) to include the real exception message in the HTTP response body — useful when you can't easily tail container logs.
+  - Set `DEBUG_LOG_FILE=/path/to/debug.log` to write full DEBUG-level logs to a separate file. The console handler stays at INFO, so main output remains clean without the extra noise.
 - Collection safety:
   - Allowed collection names are validated and only collections in allowed_collections are accepted for ingest/sync to prevent accidental data deletion.
 
@@ -92,6 +94,8 @@ Common optional (defaults shown):
 - MAX_FILE_SIZE_MB=50
 - APP_PORT=8002
 - ALLOWED_COLLECTIONS=("documents",) — validated names only
+- DEBUG_ERRORS=false — set to `true` to include exception details in HTTP error bodies (non-prod only)
+- DEBUG_LOG_FILE= — if set, full DEBUG-level logs go to this file; console stays at INFO
 
 Note: docker-compose has been updated to require API_KEY, DOCUMENT_CHUNKER_URL, QDRANT_HOST and QDRANT_API_KEY; starting compose without these will error and prevents insecure defaults.
 
