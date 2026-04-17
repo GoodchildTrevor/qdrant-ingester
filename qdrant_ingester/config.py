@@ -70,6 +70,16 @@ class Settings(BaseSettings):
         description="Optional JWT secret for future OAuth2/JWT authentication",
     )
 
+    # Debug / observability
+    debug_errors: bool = pydantic_field(
+        default=False,
+        description="Include exception details in HTTP error responses (non-prod only)",
+    )
+    debug_log_file: str | None = pydantic_field(
+        default=None,
+        description="If set, write DEBUG-level logs to this file (console keeps INFO only)",
+    )
+
     # Qdrant connection API key (if Qdrant is configured with an API key)
     qdrant_api_key: str | None = pydantic_field(
         default=None,

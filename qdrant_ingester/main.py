@@ -2,6 +2,7 @@ import logging
 import secrets
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Security
@@ -22,11 +23,51 @@ from qdrant_ingester.chunker_client import fetch_chunks
 from qdrant_ingester.embedder import embed_texts
 from qdrant_ingester.loader import upsert_data, sync_file_paths, delete_orphaned_chunks
 
-logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="qdrant-ingester", version="0.1.0")
+
+def setup_logging(settings: Settings) -> None:
+    """Configure root logger: INFO on console; DEBUG to file if debug_log_file is set."""
+    fmt = "[%(asctime)s] %(levelname)s %(name)s - %(message)s"
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    root.handlers.clear()
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(logging.Formatter(fmt))
+    root.addHandler(console)
+
+    if settings.debug_log_file:
+        try:
+            fh = logging.FileHandler(settings.debug_log_file)
+        except OSError as exc:
+            # Log to console and continue without the file handler rather than crashing.
+            logging.getLogger(__name__).warning(
+                "Could not open debug log file %r: %s", settings.debug_log_file, exc
+            )
+        else:
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(logging.Formatter(fmt))
+            root.addHandler(fh)
+            logger.debug("Debug log file: %s", settings.debug_log_file)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    setup_logging(get_settings())
+    yield
+
+
+app = FastAPI(title="qdrant-ingester", version="0.1.0", lifespan=lifespan)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def _error_detail(generic: str, exc: Exception, settings: Settings) -> str:
+    """Return generic message, or append the real exception when debug_errors is on."""
+    if settings.debug_errors:
+        return f"{generic}: {exc}"
+    return generic
 
 
 
@@ -106,7 +147,7 @@ async def ingest(
     except Exception as e:
         logger.exception("Chunker call failed for %s", file_path)
         # treat chunker as upstream; return 502 so caller can retry
-        raise HTTPException(status_code=502, detail="document-chunker error")
+        raise HTTPException(status_code=502, detail=_error_detail("document-chunker error", e, settings))
 
     if not chunk_resp.chunks:
         logger.warning("No chunks returned for %s, skipping upsert.", file_path)
@@ -134,7 +175,7 @@ async def ingest(
     except Exception as e:
         logger.exception("Embedding failed for %s", file_path)
         # Embedding considered a pipeline-level failure
-        raise HTTPException(status_code=500, detail="Embedding error")
+        raise HTTPException(status_code=500, detail=_error_detail("Embedding error", e, settings))
 
     # Step 3 — upsert (idempotent, with retries). upsert_data now returns metrics dict.
     chunks_as_dicts = [
@@ -163,7 +204,7 @@ async def ingest(
     except Exception as e:
         logger.exception("Upsert failed for %s", file_path)
         # Treat as pipeline failure only if upsert raised unexpectedly
-        raise HTTPException(status_code=500, detail="Qdrant upsert error")
+        raise HTTPException(status_code=500, detail=_error_detail("Qdrant upsert error", e, settings))
 
     # Build response: partial if any failed batches remain
     status_str = "success"
@@ -261,7 +302,7 @@ async def sync(
         )
     except Exception as e:
         logger.exception("Sync failed")
-        raise HTTPException(status_code=500, detail="Sync error")
+        raise HTTPException(status_code=500, detail=_error_detail("Sync error", e, settings))
 
     deleted_count = 0
     if deleted_paths:
@@ -274,7 +315,7 @@ async def sync(
             )
         except Exception as e:
             logger.exception("Orphan cleanup failed")
-            raise HTTPException(status_code=500, detail="Cleanup error")
+            raise HTTPException(status_code=500, detail=_error_detail("Cleanup error", e, settings))
 
     return SyncResponse(
         collection=request.collection,
