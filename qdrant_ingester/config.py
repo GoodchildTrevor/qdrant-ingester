@@ -55,6 +55,14 @@ class Settings(BaseSettings):
         default=False,
         description="If true, disables file size checks",
     )
+    ingest_root: str = pydantic_field(
+        default="/data",
+        description="Base directory allowed for ingest/sync file access",
+    )
+    api_key: str = pydantic_field(
+        default="",
+        description="Shared API key required on requests",
+    )
 
     # Security / deployment
     api_key: SecretStr | None = pydantic_field(
