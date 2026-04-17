@@ -39,15 +39,22 @@ def setup_logging(settings: Settings) -> None:
     root.addHandler(console)
 
     if settings.debug_log_file:
-        fh = logging.FileHandler(settings.debug_log_file)
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(fmt))
-        root.addHandler(fh)
-        logger.debug("Debug log file: %s", settings.debug_log_file)
+        try:
+            fh = logging.FileHandler(settings.debug_log_file)
+        except OSError as exc:
+            # Log to console and continue without the file handler rather than crashing.
+            logging.getLogger(__name__).warning(
+                "Could not open debug log file %r: %s", settings.debug_log_file, exc
+            )
+        else:
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(logging.Formatter(fmt))
+            root.addHandler(fh)
+            logger.debug("Debug log file: %s", settings.debug_log_file)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     setup_logging(get_settings())
     yield
 
