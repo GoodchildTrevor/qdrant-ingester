@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from fastembed import TextEmbedding, SparseTextEmbedding
-from pydantic import field as pydantic_field, SecretStr, field_validator
+from pydantic import field as pydantic_field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from qdrant_client import AsyncQdrantClient
 
@@ -95,6 +95,16 @@ class Settings(BaseSettings):
     # Vector config names used in Qdrant collection schema
     dense_vector_config: str = "dense"
     sparse_vector_config: str = "sparse"
+
+    @model_validator(mode="after")
+    def _validate_required_secrets(self):
+        # Ensure the service API key is configured and non-empty.
+        if not self.api_key or not self.api_key.get_secret_value().strip():
+            raise ValueError("API_KEY must be set and non-empty")
+        # Ensure Qdrant connection API key is configured and non-empty.
+        if not self.qdrant_api_key or not str(self.qdrant_api_key).strip():
+            raise ValueError("QDRANT_API_KEY must be set and non-empty")
+        return self
 
     model_config = {
         "env_file": ".env",

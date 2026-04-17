@@ -1,4 +1,6 @@
 import logging
+import secrets
+import asyncio
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Security
@@ -25,14 +27,6 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="qdrant-ingester", version="0.1.0")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-# Simple API-key protection: if Settings.api_key is empty, auth is disabled.
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-def require_api_key(key: str = Security(api_key_header)):
-    s = get_settings()
-    # settings.api_key is SecretStr | None; compare against secret value when present
-    if s.api_key:
-        if not key or key != s.api_key.get_secret_value():
-            raise HTTPException(status_code=401, detail="unauthorized")
 
 
 @app.get("/health")
@@ -44,7 +38,8 @@ def require_api_key(api_key: str | None = Security(api_key_header)) -> None:
     settings = get_settings()
     if not settings.api_key:
         raise HTTPException(status_code=500, detail="API key not configured")
-    if api_key != settings.api_key:
+    expected = settings.api_key.get_secret_value()
+    if not api_key or not secrets.compare_digest(api_key, expected):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
@@ -103,9 +98,9 @@ async def ingest(
             overlap=overlap,
         )
     except Exception as e:
-        logger.error("Chunker call failed for %s: %s", file_path, e)
+        logger.exception("Chunker call failed for %s", file_path)
         # treat chunker as upstream; return 502 so caller can retry
-        raise HTTPException(status_code=502, detail=f"document-chunker error: {e}")
+        raise HTTPException(status_code=502, detail="document-chunker error")
 
     if not chunk_resp.chunks:
         logger.warning("No chunks returned for %s, skipping upsert.", file_path)
@@ -131,9 +126,9 @@ async def ingest(
             batch_size=settings.batch_size,
         )
     except Exception as e:
-        logger.error("Embedding failed for %s: %s", file_path, e)
+        logger.exception("Embedding failed for %s", file_path)
         # Embedding considered a pipeline-level failure
-        raise HTTPException(status_code=500, detail=f"Embedding error: {e}")
+        raise HTTPException(status_code=500, detail="Embedding error")
 
     # Step 3 — upsert (idempotent, with retries). upsert_data now returns metrics dict.
     chunks_as_dicts = [
@@ -160,9 +155,9 @@ async def ingest(
             batch_size=settings.upsert_batch_size,
         )
     except Exception as e:
-        logger.error("Upsert failed for %s: %s", file_path, e)
+        logger.exception("Upsert failed for %s", file_path)
         # Treat as pipeline failure only if upsert raised unexpectedly
-        raise HTTPException(status_code=500, detail=f"Qdrant upsert error: {e}")
+        raise HTTPException(status_code=500, detail="Qdrant upsert error")
 
     # Build response: partial if any failed batches remain
     status_str = "success"
@@ -190,6 +185,16 @@ async def ingest(
     )
 
 
+def _scan_files_bounded(root: Path, limit: int = 200_000) -> set[Path]:
+    out = set()
+    for i, p in enumerate(root.rglob("*"), start=1):
+        if p.is_file():
+            out.add(p.resolve())
+        if i >= limit:
+            raise RuntimeError(f"sync scan limit exceeded: {limit}")
+    return out
+
+
 @app.post("/sync", response_model=SyncResponse)
 async def sync(
     request: SyncRequest,
@@ -209,7 +214,7 @@ async def sync(
     if not getattr(settings, "ingest_root", None):
         raise HTTPException(status_code=500, detail="INGEST_ROOT must be configured for sync")
     allowed_root = settings.ingest_root
-    current_paths = {p.resolve() for p in allowed_root.rglob("*") if p.is_file()}
+    current_paths = await asyncio.to_thread(_scan_files_bounded, allowed_root, 200_000)
 
     try:
         new_paths, deleted_paths = await sync_file_paths(
@@ -219,8 +224,8 @@ async def sync(
             scroll_limit=settings.scroll_limit,
         )
     except Exception as e:
-        logger.error("Sync failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"Sync error: {e}")
+        logger.exception("Sync failed")
+        raise HTTPException(status_code=500, detail="Sync error")
 
     deleted_count = 0
     if deleted_paths:
@@ -232,8 +237,8 @@ async def sync(
                 scroll_limit=settings.scroll_limit,
             )
         except Exception as e:
-            logger.error("Orphan cleanup failed: %s", e)
-            raise HTTPException(status_code=500, detail=f"Cleanup error: {e}")
+            logger.exception("Orphan cleanup failed")
+            raise HTTPException(status_code=500, detail="Cleanup error")
 
     return SyncResponse(
         collection=request.collection,
