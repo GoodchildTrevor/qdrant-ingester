@@ -7,6 +7,7 @@ services:
       DOCUMENT_CHUNKER_URL: ${DOCUMENT_CHUNKER_URL}
       QDRANT_HOST: ${QDRANT_HOST}
       QDRANT_PORT: ${QDRANT_PORT:-6333}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
       DENSE_MODEL_NAME: ${DENSE_MODEL_NAME:-sentence-transformers/paraphrase-multilingual-mpnet-base-v2}
       SPARSE_MODEL_NAME: ${SPARSE_MODEL_NAME:-Qdrant/bm25}
       BATCH_SIZE: ${BATCH_SIZE:-16}
@@ -28,8 +29,11 @@ services:
     image: qdrant/qdrant:1.17.1
     container_name: qdrant
     restart: unless-stopped
-    ports:
-      - "${QDRANT_PORT:-6333}:6333"
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
+    # Only expose Qdrant to the Docker network (do not publish to host by default)
+    expose:
+      - "6333"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
