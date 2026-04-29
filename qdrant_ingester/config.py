@@ -2,86 +2,86 @@ from functools import lru_cache
 from pathlib import Path
 
 from fastembed import TextEmbedding, SparseTextEmbedding
-from pydantic import field as pydantic_field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from qdrant_client import AsyncQdrantClient
 
 
 class Settings(BaseSettings):
-    document_chunker_url: str = pydantic_field(
+    document_chunker_url: str = Field(
         description="URL of the document-chunker /chunk endpoint"
     )
-    qdrant_host: str = pydantic_field(
+    qdrant_host: str = Field(
         description="Qdrant hostname"
     )
-    qdrant_port: int = pydantic_field(
+    qdrant_port: int = Field(
         default=6333,
         description="Qdrant port",
     )
-    dense_model_name: str = pydantic_field(
+    dense_model_name: str = Field(
         default="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
         description="fastembed dense model name",
     )
-    sparse_model_name: str = pydantic_field(
+    sparse_model_name: str = Field(
         default="Qdrant/bm25",
         description="fastembed sparse (BM25) model name",
     )
-    batch_size: int = pydantic_field(
+    batch_size: int = Field(
         default=16,
         description="Embedding batch size",
     )
-    upsert_batch_size: int = pydantic_field(
+    upsert_batch_size: int = Field(
         default=16,
         description="Qdrant upsert batch size",
     )
-    scroll_limit: int = pydantic_field(
+    scroll_limit: int = Field(
         default=1000,
         description="Qdrant scroll page size",
     )
-    chunk_size: int = pydantic_field(
+    chunk_size: int = Field(
         default=512,
         description="chunk_size forwarded to document-chunker",
     )
-    overlap: int = pydantic_field(
+    overlap: int = Field(
         default=1,
         description="overlap forwarded to document-chunker",
     )
-    max_file_size_mb: int = pydantic_field(
+    max_file_size_mb: int = Field(
         default=200,
         ge=1,
         description="Maximum allowed file size for ingest in megabytes",
     )
-    disable_file_size_limit: bool = pydantic_field(
+    disable_file_size_limit: bool = Field(
         default=False,
         description="If true, disables file size checks",
     )
 
     # Security / deployment
-    api_key: SecretStr | None = pydantic_field(
+    api_key: SecretStr | None = Field(
         default=None,
         description="Simple API key for protecting endpoints (empty disables)",
     )
-    ingest_root: Path = pydantic_field(
+    ingest_root: Path = Field(
         default=Path("/data"),
         description="Path prefix restricting ingest/sync to a specific directory",
     )
-    jwt_secret: str | None = pydantic_field(
+    jwt_secret: str | None = Field(
         default=None,
         description="Optional JWT secret for future OAuth2/JWT authentication",
     )
 
     # Debug / observability
-    debug_errors: bool = pydantic_field(
+    debug_errors: bool = Field(
         default=False,
         description="Include exception details in HTTP error responses (non-prod only)",
     )
-    debug_log_file: str | None = pydantic_field(
+    debug_log_file: str | None = Field(
         default=None,
         description="If set, write DEBUG-level logs to this file (console keeps INFO only)",
     )
 
     # Qdrant connection API key (if Qdrant is configured with an API key)
-    qdrant_api_key: str | None = pydantic_field(
+    qdrant_api_key: str | None = Field(
         default=None,
         description="Optional API key to pass to Qdrant client",
     )
@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     dense_vector_config: str = "dense"
     sparse_vector_config: str = "sparse"
 
-    allowed_collections: tuple[str, ...] = pydantic_field(
+    allowed_collections: tuple[str, ...] = Field(
         default=("documents",),
         description="Collections allowed for ingest/sync operations",
     )
