@@ -1,3 +1,5 @@
+import os
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -147,9 +149,37 @@ def get_qdrant_client() -> AsyncQdrantClient:
 
 @lru_cache
 def get_dense_model() -> TextEmbedding:
+    if os.getenv("FASTEMBED_FAKE_MODELS") == "1":
+        return _DummyDenseEmbedding()
     return TextEmbedding(model_name=get_settings().dense_model_name)
 
 
 @lru_cache
 def get_sparse_model() -> SparseTextEmbedding:
+    if os.getenv("FASTEMBED_FAKE_MODELS") == "1":
+        return _DummySparseEmbedding()
     return SparseTextEmbedding(model_name=get_settings().sparse_model_name)
+
+
+@dataclass
+class _DummyDenseEmbedding:
+    dim: int = 8
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[len(text) * 1.0] * self.dim for text in texts]
+
+
+@dataclass
+class _DummySparseItem:
+    text_len: int
+
+    def as_object(self) -> dict[str, int]:
+        return {"length": self.text_len}
+
+
+@dataclass
+class _DummySparseEmbedding:
+    dim: int = 8
+
+    def embed(self, texts: list[str]) -> list[_DummySparseItem]:
+        return [_DummySparseItem(len(text)) for text in texts]

@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "httpx"]
+dev = ["pytest", "pytest-asyncio", "httpx", "respx>=0.26.0", "pytest-cov", "pytest-mock"]
 
 [tool.setuptools.packages.find]
 where = ["."]
