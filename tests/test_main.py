@@ -1,3 +1,5 @@
+import pytest
+
 from qdrant_ingester.main import _merge_payload
 
 
