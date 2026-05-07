@@ -1,4 +1,4 @@
-from pathlib import Path
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -28,8 +28,9 @@ class DummyClient:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
+    @asynccontextmanager
     async def stream(self, *args, **kwargs):
-        return self.response
+        yield self.response
 
 
 @pytest.mark.asyncio
@@ -39,10 +40,6 @@ async def test_fetch_chunks_success(monkeypatch, tmp_path):
 
     response = DummyResponse(200, b"{}")
     client = DummyClient(response)
-
-    async def dummy_async_client(*args, **kwargs):
-        return client
-
     monkeypatch.setattr("qdrant_ingester.chunker_client.httpx.AsyncClient", lambda *args, **kwargs: client)
 
     result = await fetch_chunks(
@@ -53,3 +50,39 @@ async def test_fetch_chunks_success(monkeypatch, tmp_path):
     )
 
     assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_chunks_http_error(monkeypatch, tmp_path):
+    path = tmp_path / "file.txt"
+    path.write_text("dummy")
+
+    response = DummyResponse(500, b"{}")
+    client = DummyClient(response)
+    monkeypatch.setattr("qdrant_ingester.chunker_client.httpx.AsyncClient", lambda *args, **kwargs: client)
+
+    with pytest.raises(RuntimeError):
+        await fetch_chunks(
+            chunker_url="http://chunker",
+            file_path=path,
+            chunk_size=16,
+            overlap=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_fetch_chunks_invalid_json(monkeypatch, tmp_path):
+    path = tmp_path / "file.txt"
+    path.write_text("dummy")
+
+    response = DummyResponse(200, b"not-json")
+    client = DummyClient(response)
+    monkeypatch.setattr("qdrant_ingester.chunker_client.httpx.AsyncClient", lambda *args, **kwargs: client)
+
+    with pytest.raises(ValueError):
+        await fetch_chunks(
+            chunker_url="http://chunker",
+            file_path=path,
+            chunk_size=16,
+            overlap=1,
+        )

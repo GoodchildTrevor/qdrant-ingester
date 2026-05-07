@@ -32,7 +32,6 @@ services:
     restart: unless-stopped
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY is required}
-    # Only expose Qdrant to the Docker network (do not publish to host by default)
     expose:
       - "6333"
     volumes:
@@ -43,6 +42,30 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: qdrant_ingester_test
+    environment:
+      API_KEY: ${API_KEY:?API_KEY is required}
+      DOCUMENT_CHUNKER_URL: ${DOCUMENT_CHUNKER_URL:?DOCUMENT_CHUNKER_URL is required}
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY is required}
+      DENSE_MODEL_NAME: ${DENSE_MODEL_NAME:-sentence-transformers/paraphrase-multilingual-mpnet-base-v2}
+      SPARSE_MODEL_NAME: ${SPARSE_MODEL_NAME:-Qdrant/bm25}
+      BATCH_SIZE: ${BATCH_SIZE:-16}
+      UPSERT_BATCH_SIZE: ${UPSERT_BATCH_SIZE:-16}
+      SCROLL_LIMIT: ${SCROLL_LIMIT:-1000}
+      CHUNK_SIZE: ${CHUNK_SIZE:-512}
+      OVERLAP: ${OVERLAP:-1}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    profiles:
+      - test
 
 volumes:
   qdrant_data:
