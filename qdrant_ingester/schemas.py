@@ -22,6 +22,7 @@ class IngestRequest(BaseModel):
     file_path: str          # original path on disk (stored in Qdrant payload)
     chunk_size: int | None = None
     overlap: int | None = None
+    extra_payload: dict[str, Any] = {}  # optional caller-supplied metadata merged into Qdrant payload
 
 class IngestResponse(BaseModel):
     collection: str
