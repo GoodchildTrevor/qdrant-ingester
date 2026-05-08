@@ -20,6 +20,10 @@ class Settings(BaseSettings):
         default=6333,
         description="Qdrant port",
     )
+    qdrant_https: bool = Field(
+        default=False,
+        description="Whether to use HTTPS for Qdrant connection (default: False for internal Docker networking)",
+    )
     dense_model_name: str = Field(
         default="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
         description="fastembed dense model name",
@@ -141,10 +145,12 @@ def get_settings() -> Settings:
 @lru_cache
 def get_qdrant_client() -> AsyncQdrantClient:
     s = get_settings()
-    # include api_key when configured
-    if getattr(s, "qdrant_api_key", None):
-        return AsyncQdrantClient(host=s.qdrant_host, port=s.qdrant_port, api_key=s.qdrant_api_key)
-    return AsyncQdrantClient(host=s.qdrant_host, port=s.qdrant_port)
+    return AsyncQdrantClient(
+        host=s.qdrant_host,
+        port=s.qdrant_port,
+        api_key=s.qdrant_api_key or None,
+        https=s.qdrant_https,
+    )
 
 
 @lru_cache
