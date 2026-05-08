@@ -7,6 +7,12 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.security import APIKeyHeader
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    SparseVectorParams,
+    SparseIndexParams,
+)
 
 from qdrant_ingester.config import (
     get_settings,
@@ -30,6 +36,15 @@ _RESERVED_PAYLOAD_KEYS = frozenset({
     "name", "file_path", "file_format", "creation_date", "modification_date"
 })
 
+# Dense vector dimensions by known model names
+_DENSE_DIMS: dict[str, int] = {
+    "intfloat/multilingual-e5-large": 1024,
+    "intfloat/multilingual-e5-base": 768,
+    "sentence-transformers/paraphrase-multilingual-mpnet-base-v2": 768,
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": 384,
+}
+_DENSE_DIMS_DEFAULT = 768
+
 
 def _merge_payload(base: dict, extra: dict) -> dict:
     """Merge extra_payload into base, raising 422 if any reserved key is present."""
@@ -43,7 +58,6 @@ def _merge_payload(base: dict, extra: dict) -> dict:
 
 
 def setup_logging(settings: Settings) -> None:
-    """Configure root logger: INFO on console; DEBUG to file if debug_log_file is set."""
     fmt = "[%(asctime)s] %(levelname)s %(name)s - %(message)s"
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
@@ -68,9 +82,43 @@ def setup_logging(settings: Settings) -> None:
             logger.debug("Debug log file: %s", settings.debug_log_file)
 
 
+async def ensure_collections(settings: Settings) -> None:
+    """Create all allowed_collections in Qdrant if they do not already exist."""
+    client = get_qdrant_client()
+    dense_dim = _DENSE_DIMS.get(settings.dense_model_name, _DENSE_DIMS_DEFAULT)
+
+    existing = {c.name for c in (await client.get_collections()).collections}
+
+    for collection in settings.allowed_collections:
+        if collection in existing:
+            logger.info("Collection '%s' already exists, skipping creation.", collection)
+            continue
+        await client.create_collection(
+            collection_name=collection,
+            vectors_config={settings.dense_vector_config: VectorParams(
+                size=dense_dim,
+                distance=Distance.COSINE,
+            )},
+            sparse_vectors_config={settings.sparse_vector_config: SparseVectorParams(
+                index=SparseIndexParams(on_disk=False),
+            )},
+        )
+        logger.info(
+            "Created collection '%s' (dense_dim=%d, dense='%s', sparse='%s').",
+            collection, dense_dim,
+            settings.dense_vector_config,
+            settings.sparse_vector_config,
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    setup_logging(get_settings())
+    settings = get_settings()
+    setup_logging(settings)
+    try:
+        await ensure_collections(settings)
+    except Exception:
+        logger.exception("Failed to ensure Qdrant collections on startup")
     yield
 
 
@@ -79,7 +127,6 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 def _error_detail(generic: str, exc: Exception, settings: Settings) -> str:
-    """Return generic message, or append the real exception when debug_errors is on."""
     if settings.debug_errors:
         return f"{generic}: {exc}"
     return generic
@@ -128,11 +175,6 @@ async def ingest(
     request: IngestRequest,
     _: None = Depends(require_api_key),
 ):
-    """
-    Full pipeline for a single file: chunk -> embed -> upsert.
-    Returns partial success metadata if some upsert batches ultimately fail.
-    Optional `extra_payload` fields are merged into every Qdrant point payload.
-    """
     settings = get_settings()
     require_allowed_collection(request.collection, settings)
     client = get_qdrant_client()
@@ -141,7 +183,6 @@ async def ingest(
 
     chunk_size = request.chunk_size or settings.chunk_size
     overlap = request.overlap or settings.overlap
-    # Restrict ingest to an allowed root if configured to prevent LFI/exfiltration
     if getattr(settings, "ingest_root", ""):
         allowed_root = Path(settings.ingest_root).resolve()
         file_path = (allowed_root / request.file_path).resolve()
@@ -158,7 +199,6 @@ async def ingest(
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
 
-    # Enforce maximum file size (can be disabled via disable_file_size_limit)
     try:
         size_mb = file_path.stat().st_size / (1024 * 1024)
     except Exception:
@@ -166,7 +206,6 @@ async def ingest(
     if not getattr(settings, "disable_file_size_limit", False) and size_mb is not None and size_mb > settings.max_file_size_mb:
         raise HTTPException(status_code=413, detail=f"File too large ({size_mb:.1f} MB)")
 
-    # Step 1 — chunk
     try:
         chunk_resp = await fetch_chunks(
             chunker_url=settings.document_chunker_url,
@@ -192,7 +231,6 @@ async def ingest(
             failed_batches=[],
         )
 
-    # Step 2 — embed
     lemmas = [ch.lemmas for ch in chunk_resp.chunks]
     try:
         dense_embs, sparse_embs = await embed_texts(
@@ -205,7 +243,6 @@ async def ingest(
         logger.exception("Embedding failed for %s", file_path)
         raise HTTPException(status_code=500, detail=_error_detail("Embedding error", e, settings))
 
-    # Step 3 — upsert (idempotent, with retries).
     chunks_as_dicts = [
         {"raw": ch.raw, "lemmas": ch.lemmas, "meta": ch.meta}
         for ch in chunk_resp.chunks
@@ -217,7 +254,6 @@ async def ingest(
         "creation_date": chunk_resp.creation_date,
         "modification_date": chunk_resp.modification_date,
     }
-    # Merge caller-supplied extra fields (reserved keys are rejected with 422)
     base_payload = _merge_payload(base_payload, request.extra_payload)
 
     try:
@@ -236,7 +272,6 @@ async def ingest(
         logger.exception("Upsert failed for %s", file_path)
         raise HTTPException(status_code=500, detail=_error_detail("Qdrant upsert error", e, settings))
 
-    # Build response: partial if any failed batches remain
     status_str = "success"
     if metrics.get("chunks_failed", 0) > 0:
         status_str = "partial"
@@ -279,7 +314,7 @@ SYNC_SCAN_TIMEOUT_SECONDS = 60
 async def get_current_paths_cached(root: Path) -> set[Path]:
     now = time.time()
     if now - float(_sync_cache["ts"]) <= SYNC_CACHE_TTL_SECONDS:
-        return set(_sync_cache["paths"])  # defensive copy
+        return set(_sync_cache["paths"])
 
     async with _sync_lock:
         now = time.time()
@@ -300,12 +335,6 @@ async def sync(
     request: SyncRequest,
     _ : None = Depends(require_api_key),
 ):
-    """
-    Synchronize Qdrant collection against current filesystem state:
-    - Detect new files (not yet in Qdrant)
-    - Delete orphaned chunks (files that no longer exist)
-    Returns new file paths and count of deleted chunks.
-    """
     settings = get_settings()
     require_allowed_collection(request.collection, settings)
     client = get_qdrant_client()
