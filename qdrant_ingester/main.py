@@ -25,6 +25,22 @@ from qdrant_ingester.loader import upsert_data, sync_file_paths, delete_orphaned
 
 logger = logging.getLogger(__name__)
 
+# Keys that callers must not override via extra_payload
+_RESERVED_PAYLOAD_KEYS = frozenset({
+    "name", "file_path", "file_format", "creation_date", "modification_date"
+})
+
+
+def _merge_payload(base: dict, extra: dict) -> dict:
+    """Merge extra_payload into base, raising 422 if any reserved key is present."""
+    overlap = _RESERVED_PAYLOAD_KEYS & extra.keys()
+    if overlap:
+        raise HTTPException(
+            status_code=422,
+            detail=f"extra_payload cannot override reserved keys: {sorted(overlap)}",
+        )
+    return {**base, **extra}
+
 
 def setup_logging(settings: Settings) -> None:
     """Configure root logger: INFO on console; DEBUG to file if debug_log_file is set."""
@@ -42,7 +58,6 @@ def setup_logging(settings: Settings) -> None:
         try:
             fh = logging.FileHandler(settings.debug_log_file)
         except OSError as exc:
-            # Log to console and continue without the file handler rather than crashing.
             logging.getLogger(__name__).warning(
                 "Could not open debug log file %r: %s", settings.debug_log_file, exc
             )
@@ -108,6 +123,7 @@ async def ingest(
     """
     Full pipeline for a single file: chunk -> embed -> upsert.
     Returns partial success metadata if some upsert batches ultimately fail.
+    Optional `extra_payload` fields are merged into every Qdrant point payload.
     """
     settings = get_settings()
     require_allowed_collection(request.collection, settings)
@@ -146,7 +162,6 @@ async def ingest(
         )
     except Exception as e:
         logger.exception("Chunker call failed for %s", file_path)
-        # treat chunker as upstream; return 502 so caller can retry
         raise HTTPException(status_code=502, detail=_error_detail("document-chunker error", e, settings))
 
     if not chunk_resp.chunks:
@@ -174,10 +189,9 @@ async def ingest(
         )
     except Exception as e:
         logger.exception("Embedding failed for %s", file_path)
-        # Embedding considered a pipeline-level failure
         raise HTTPException(status_code=500, detail=_error_detail("Embedding error", e, settings))
 
-    # Step 3 — upsert (idempotent, with retries). upsert_data now returns metrics dict.
+    # Step 3 — upsert (idempotent, with retries).
     chunks_as_dicts = [
         {"raw": ch.raw, "lemmas": ch.lemmas, "meta": ch.meta}
         for ch in chunk_resp.chunks
@@ -189,6 +203,9 @@ async def ingest(
         "creation_date": chunk_resp.creation_date,
         "modification_date": chunk_resp.modification_date,
     }
+    # Merge caller-supplied extra fields (reserved keys are rejected with 422)
+    base_payload = _merge_payload(base_payload, request.extra_payload)
+
     try:
         metrics = await upsert_data(
             client=client,
@@ -203,7 +220,6 @@ async def ingest(
         )
     except Exception as e:
         logger.exception("Upsert failed for %s", file_path)
-        # Treat as pipeline failure only if upsert raised unexpectedly
         raise HTTPException(status_code=500, detail=_error_detail("Qdrant upsert error", e, settings))
 
     # Build response: partial if any failed batches remain
@@ -280,8 +296,6 @@ async def sync(
     require_allowed_collection(request.collection, settings)
     client = get_qdrant_client()
 
-    # Server-side source of truth for sync: derive current paths from ingest_root only.
-    # Require ingest_root to be configured to avoid trusting client-supplied lists.
     if not getattr(settings, "ingest_root", None):
         raise HTTPException(status_code=500, detail="INGEST_ROOT must be configured for sync")
     allowed_root = settings.ingest_root
