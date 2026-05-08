@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import logging
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,14 @@ from qdrant_client.models import PointStruct
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _make_point_id(file_path: str, index: int) -> str:
+    """Deterministic UUID derived from (file_path, chunk_index) for idempotency."""
+    digest = hashlib.sha1(f"{file_path}:{index}".encode()).digest()
+    # Pad/truncate to 16 bytes and build a valid UUID
+    return str(uuid.UUID(bytes=digest[:16]))
+
 
 async def upsert_data(
     client: AsyncQdrantClient,
@@ -37,16 +47,12 @@ async def upsert_data(
         "failed_batches": list[dict]
     }
     """
-    import hashlib
-
     total_chunks = len(chunks)
 
     def point_generator():
         file_path = base_payload.get("file_path", "")
         for i, chunk in enumerate(chunks):
-            # deterministic id: sha1(file_path + ":" + index)
-            id_str = f"{file_path}:{i}"
-            pid = hashlib.sha1(id_str.encode()).hexdigest()
+            pid = _make_point_id(file_path, i)
             vector_dict: dict[str, Any] = {
                 dense_vector_config: dense_embeddings[i],
                 sparse_vector_config: sparse_embeddings[i].as_object(),
@@ -83,7 +89,6 @@ async def upsert_data(
                 )
                 upserted += len(batch_list)
                 success = True
-                # small pause to avoid hammering
                 await asyncio.sleep(0.1)
             except Exception as e:
                 logger.warning(
@@ -107,7 +112,6 @@ async def upsert_data(
                             "ids": [p.id for p in batch_list],
                         }
                     )
-                    # proceed to next batch
     logger.info(
         "Upsert summary for '%s': total=%d upserted=%d failed=%d",
         collection_name,
@@ -121,6 +125,7 @@ async def upsert_data(
         "chunks_failed": failed,
         "failed_batches": failed_batches,
     }
+
 
 async def sync_file_paths(
     client: AsyncQdrantClient,
@@ -160,10 +165,10 @@ async def sync_file_paths(
         raise
 
     new_paths = {Path(p) for p in (current_str - db_str)}
-    deleted = current_str - db_str  # re-used as deleted = db_str - current_str
     deleted = db_str - current_str
     logger.info("%d new, %d deleted for collection '%s'", len(new_paths), len(deleted), collection)
     return new_paths, deleted
+
 
 async def delete_orphaned_chunks(
     client: AsyncQdrantClient,
