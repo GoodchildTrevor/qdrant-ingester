@@ -107,12 +107,20 @@ def resolve_path(settings: Settings, path_str: str) -> Path:
         candidate = root / candidate
     candidate = candidate.resolve()
     if not candidate.is_relative_to(root):
+        logger.warning(
+            "Rejected path %r: not relative to ingest_root=%r", str(candidate), str(root)
+        )
         raise HTTPException(status_code=403, detail="File path not allowed")
     return candidate
 
 
 def require_allowed_collection(collection: str, settings: Settings) -> None:
     if collection not in settings.allowed_collections:
+        logger.warning(
+            "Rejected collection %r: not in allowed_collections=%s",
+            collection,
+            list(settings.allowed_collections),
+        )
         raise HTTPException(status_code=403, detail="Collection is not allowed")
 
 @app.post("/ingest", response_model=IngestResponse)
@@ -138,6 +146,12 @@ async def ingest(
         allowed_root = Path(settings.ingest_root).resolve()
         file_path = (allowed_root / request.file_path).resolve()
         if allowed_root not in file_path.parents and file_path != allowed_root:
+            logger.warning(
+                "Rejected path %r: not under ingest_root=%r (raw request.file_path=%r)",
+                str(file_path),
+                str(allowed_root),
+                request.file_path,
+            )
             raise HTTPException(status_code=403, detail="path not allowed")
     else:
         file_path = Path(request.file_path)
