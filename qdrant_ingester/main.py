@@ -231,6 +231,31 @@ async def ingest(
             failed_batches=[],
         )
 
+    # --- inline_threshold check: return raw text if document is small enough ---
+    if request.inline_threshold is not None:
+        full_text = "\n\n".join(ch.raw for ch in chunk_resp.chunks)
+        token_count = len(full_text.split())
+        if token_count <= request.inline_threshold:
+            logger.info(
+                "Document %s is below inline_threshold (%d <= %d), returning inline text.",
+                file_path, token_count, request.inline_threshold,
+            )
+            return IngestResponse(
+                collection=request.collection,
+                file_name=chunk_resp.file_name,
+                status="success",
+                partial=False,
+                message=None,
+                chunks_total=len(chunk_resp.chunks),
+                chunks_upserted=0,
+                chunks_failed=0,
+                failed_batches=[],
+                token_count=token_count,
+                inline_text=full_text,
+            )
+    else:
+        token_count = None
+
     lemmas = [ch.lemmas for ch in chunk_resp.chunks]
     try:
         dense_embs, sparse_embs = await embed_texts(
@@ -294,6 +319,8 @@ async def ingest(
         chunks_upserted=metrics.get("chunks_upserted", 0),
         chunks_failed=failed,
         failed_batches=failed_batches,
+        token_count=token_count,
+        inline_text=None,
     )
 
 
