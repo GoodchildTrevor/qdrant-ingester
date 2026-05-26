@@ -281,6 +281,31 @@ async def get_current_paths_cached(root: Path) -> set[Path]:
         return set(paths)
 
 
+@app.get("/files/{collection}")
+async def list_files(
+    collection: str,
+    _: None = Depends(require_api_key),
+):
+    settings = get_settings()
+    require_allowed_collection(collection, settings)
+
+    root = Path(settings.ingest_root) / collection
+    if not root.exists():
+        return {"collection": collection, "files": []}
+
+    files = []
+    for p in sorted(root.rglob("*")):
+        if p.is_file():
+            stat = p.stat()
+            files.append({
+                "name": p.name,
+                "path": str(p.relative_to(root)),  # relative to collection dir
+                "size_kb": round(stat.st_size / 1024, 1),
+                "modified": stat.st_mtime,
+            })
+    return {"collection": collection, "files": files}
+
+
 @app.post("/sync", response_model=SyncResponse)
 async def sync(
     request: SyncRequest,

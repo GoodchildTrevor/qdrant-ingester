@@ -84,6 +84,88 @@ async def test_ingest_route_pipelines(monkeypatch, tmp_path, dummy_settings):
 
 
 @pytest.mark.asyncio
+async def test_list_files_endpoint(monkeypatch, tmp_path, dummy_settings):
+    # Create a collection directory with some files
+    collection_dir = tmp_path / "documents"
+    collection_dir.mkdir()
+    
+    # Create some test files
+    file1 = collection_dir / "file1.txt"
+    file1.write_text("content1")
+    
+    file2 = collection_dir / "subdir" / "file2.txt"
+    file2.parent.mkdir()
+    file2.write_text("content2" * 100)  # Larger file to test size calculation
+    
+    # Update ingest_root in settings to point to our tmp_path
+    dummy_settings.ingest_root = tmp_path
+    dummy_settings.allowed_collections = ("documents",)
+    
+    async with AsyncClient(app=main.app, base_url="http://test") as client:
+        response = await client.get(
+            "/files/documents",
+            headers={"X-API-Key": "secret"},
+        )
+    
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["collection"] == "documents"
+    assert len(payload["files"]) == 2
+    
+    # Check file1 details
+    file1_info = next(f for f in payload["files"] if f["name"] == "file1.txt")
+    assert file1_info["path"] == "file1.txt"
+    assert file1_info["size_kb"] == 0.0  # Small file rounds to 0.0 KB
+    
+    # Check file2 details
+    file2_info = next(f for f in payload["files"] if f["name"] == "file2.txt")
+    assert file2_info["path"] == "subdir/file2.txt"
+    assert file2_info["size_kb"] == 0.9  # 900 bytes = 0.9 KB
+
+
+@pytest.mark.asyncio
+async def test_list_files_endpoint_empty_collection(monkeypatch, tmp_path, dummy_settings):
+    # Create an empty collection directory
+    collection_dir = tmp_path / "empty_collection"
+    collection_dir.mkdir()
+    
+    # Update ingest_root in settings to point to our tmp_path
+    dummy_settings.ingest_root = tmp_path
+    dummy_settings.allowed_collections = ("empty_collection",)
+    
+    async with AsyncClient(app=main.app, base_url="http://test") as client:
+        response = await client.get(
+            "/files/empty_collection",
+            headers={"X-API-Key": "secret"},
+        )
+    
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["collection"] == "empty_collection"
+    assert payload["files"] == []
+
+
+@pytest.mark.asyncio
+async def test_list_files_endpoint_nonexistent_collection(monkeypatch, tmp_path, dummy_settings):
+    # Don't create the collection directory
+    
+    # Update ingest_root in settings to point to our tmp_path
+    dummy_settings.ingest_root = tmp_path
+    dummy_settings.allowed_collections = ("nonexistent",)
+    
+    async with AsyncClient(app=main.app, base_url="http://test") as client:
+        response = await client.get(
+            "/files/nonexistent",
+            headers={"X-API-Key": "secret"},
+        )
+    
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["collection"] == "nonexistent"
+    assert payload["files"] == []
+
+
+@pytest.mark.asyncio
 async def test_ingest_extra_payload_reserved(monkeypatch, tmp_path, dummy_settings):
     target_file = tmp_path / "doc.txt"
     target_file.write_text("content")
