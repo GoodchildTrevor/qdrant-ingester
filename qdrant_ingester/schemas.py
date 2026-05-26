@@ -15,6 +15,28 @@ class ChunkResponse(BaseModel):
     modification_date: str
     chunks: list[ChunkSchema]
 
+# ---- Preview request / response --------------------------------------------
+
+class PreviewRequest(BaseModel):
+    collection: str
+    file_name: str          # relative to INGEST_ROOT/collection
+    chunk_size: int | None = None
+    overlap: int | None = None
+
+class ChunkPreview(BaseModel):
+    index: int
+    raw: str
+    lemmas: str
+    char_count: int
+    word_count: int
+
+class PreviewResponse(BaseModel):
+    collection: str
+    file_name: str
+    file_format: str
+    chunks_total: int
+    chunks: list[ChunkPreview]
+
 # ---- Ingest request / response ----------------------------------------------
 
 class IngestRequest(BaseModel):

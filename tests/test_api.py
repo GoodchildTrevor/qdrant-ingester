@@ -2,7 +2,7 @@ import pytest
 from httpx import AsyncClient
 
 from qdrant_ingester import main
-from qdrant_ingester.schemas import ChunkResponse, ChunkSchema
+from qdrant_ingester.schemas import ChunkResponse, ChunkSchema, PreviewResponse
 
 
 @pytest.fixture
@@ -195,3 +195,87 @@ async def test_ingest_extra_payload_reserved(monkeypatch, tmp_path, dummy_settin
         )
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_preview_route(monkeypatch, tmp_path, dummy_settings):
+    # Create a test file
+    collection_dir = tmp_path / "documents"
+    collection_dir.mkdir()
+    target_file = collection_dir / "doc.txt"
+    target_file.write_text("hello world")
+
+    # Mock the fetch_chunks function to return a predefined response
+    chunk = ChunkSchema(raw="hello world", lemmas="hello world", meta={})
+    chunk_resp = ChunkResponse(
+        file_name="doc.txt",
+        file_format="text/plain",
+        creation_date="2024-01-01T00:00:00Z",
+        modification_date="2024-01-01T00:00:00Z",
+        chunks=[chunk],
+    )
+
+    async def fake_fetch_chunks(*args, **kwargs):
+        return chunk_resp
+
+    monkeypatch.setattr(main, "fetch_chunks", fake_fetch_chunks)
+
+    # Update ingest_root in settings to point to our tmp_path
+    dummy_settings.ingest_root = tmp_path
+    dummy_settings.allowed_collections = ("documents",)
+
+    async with AsyncClient(app=main.app, base_url="http://test") as client:
+        response = await client.post(
+            "/preview",
+            json={
+                "collection": "documents",
+                "file_name": "doc.txt",
+                "chunk_size": 512,
+                "overlap": 1,
+            },
+            headers={"X-API-Key": "secret"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    
+    # Validate the response structure
+    preview_response = PreviewResponse(**payload)
+    assert preview_response.collection == "documents"
+    assert preview_response.file_name == "doc.txt"
+    assert preview_response.file_format == "text/plain"
+    assert preview_response.chunks_total == 1
+    
+    # Validate the chunk preview
+    assert len(preview_response.chunks) == 1
+    chunk_preview = preview_response.chunks[0]
+    assert chunk_preview.index == 0
+    assert chunk_preview.raw == "hello world"
+    assert chunk_preview.lemmas == "hello world"
+    assert chunk_preview.char_count == 11
+    assert chunk_preview.word_count == 2
+
+
+@pytest.mark.asyncio
+async def test_preview_route_file_not_found(monkeypatch, tmp_path, dummy_settings):
+    # Create collection directory but no file
+    collection_dir = tmp_path / "documents"
+    collection_dir.mkdir()
+
+    # Update ingest_root in settings to point to our tmp_path
+    dummy_settings.ingest_root = tmp_path
+    dummy_settings.allowed_collections = ("documents",)
+
+    async with AsyncClient(app=main.app, base_url="http://test") as client:
+        response = await client.post(
+            "/preview",
+            json={
+                "collection": "documents",
+                "file_name": "nonexistent.txt",
+                "chunk_size": 512,
+                "overlap": 1,
+            },
+            headers={"X-API-Key": "secret"},
+        )
+
+    assert response.status_code == 404

@@ -24,6 +24,7 @@ from qdrant_ingester.config import (
 from qdrant_ingester.schemas import (
     IngestRequest, IngestResponse,
     SyncRequest, SyncResponse,
+    PreviewRequest, PreviewResponse, ChunkPreview,
 )
 from qdrant_ingester.chunker_client import fetch_chunks
 from qdrant_ingester.embedder import embed_texts
@@ -430,4 +431,47 @@ async def sync(
         collection=request.collection,
         new_files=[str(p) for p in new_paths],
         deleted_chunks=deleted_count,
+    )
+
+
+@app.post("/preview", response_model=PreviewResponse)
+async def preview(
+    request: PreviewRequest,
+    _: None = Depends(require_api_key),
+):
+    settings = get_settings()
+    require_allowed_collection(request.collection, settings)
+
+    file_path = Path(settings.ingest_root) / request.collection / request.file_name
+    file_path = file_path.resolve()
+
+    # Reuse existing path guard
+    allowed_root = Path(settings.ingest_root).resolve()
+    if not file_path.is_relative_to(allowed_root):
+        raise HTTPException(status_code=403, detail="path not allowed")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+    chunk_resp = await fetch_chunks(
+        chunker_url=settings.document_chunker_url,
+        file_path=file_path,
+        chunk_size=request.chunk_size or settings.chunk_size,
+        overlap=request.overlap or settings.overlap,
+    )
+
+    return PreviewResponse(
+        collection=request.collection,
+        file_name=chunk_resp.file_name,
+        file_format=chunk_resp.file_format,
+        chunks_total=len(chunk_resp.chunks),
+        chunks=[
+            ChunkPreview(
+                index=i,
+                raw=ch.raw,
+                lemmas=ch.lemmas,
+                char_count=len(ch.raw),
+                word_count=len(ch.raw.split()),
+            )
+            for i, ch in enumerate(chunk_resp.chunks)
+        ],
     )
