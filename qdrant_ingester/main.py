@@ -184,19 +184,22 @@ async def ingest(
 
     chunk_size = request.chunk_size or settings.chunk_size
     overlap = request.overlap or settings.overlap
-    if getattr(settings, "ingest_root", ""):
-        allowed_root = Path(settings.ingest_root).resolve()
-        file_path = (allowed_root / request.file_path).resolve()
-        if allowed_root not in file_path.parents and file_path != allowed_root:
-            logger.warning(
-                "Rejected path %r: not under ingest_root=%r (raw request.file_path=%r)",
-                str(file_path),
-                str(allowed_root),
-                request.file_path,
-            )
-            raise HTTPException(status_code=403, detail="path not allowed")
-    else:
-        file_path = Path(request.file_path)
+
+    # Build file_path from collection + file_name
+    allowed_root = Path(settings.ingest_root).resolve()
+    file_path = (allowed_root / request.collection / request.file_name).resolve()
+
+    # Path guard: ensure resolved path is under ingest_root
+    if not file_path.is_relative_to(allowed_root):
+        logger.warning(
+            "Rejected path %r: not under ingest_root=%r (collection=%r, file_name=%r)",
+            str(file_path),
+            str(allowed_root),
+            request.collection,
+            request.file_name,
+        )
+        raise HTTPException(status_code=403, detail="path not allowed")
+
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
 

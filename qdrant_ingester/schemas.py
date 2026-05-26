@@ -41,7 +41,7 @@ class PreviewResponse(BaseModel):
 
 class IngestRequest(BaseModel):
     collection: str
-    file_path: str          # original path on disk (stored in Qdrant payload)
+    file_name: str          # relative to INGEST_ROOT/collection
     chunk_size: int | None = None
     overlap: int | None = None
     extra_payload: dict[str, Any] = {}  # optional caller-supplied metadata merged into Qdrant payload
