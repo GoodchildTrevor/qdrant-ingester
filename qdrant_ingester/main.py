@@ -7,6 +7,8 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from qdrant_client.models import (
     Distance,
     VectorParams,
@@ -45,6 +47,8 @@ _DENSE_DIMS: dict[str, int] = {
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": 384,
 }
 _DENSE_DIMS_DEFAULT = 768
+
+_STATIC_DIR = Path(__file__).parent / "static"
 
 
 def _merge_payload(base: dict, extra: dict) -> dict:
@@ -435,6 +439,15 @@ async def sync(
         new_files=[str(p) for p in new_paths],
         deleted_chunks=deleted_count,
     )
+
+
+@app.get("/", include_in_schema=False)
+def root_ui():
+    return FileResponse(_STATIC_DIR / "index.html")
+
+
+if _STATIC_DIR.exists():
+    app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
 
 
 @app.post("/preview", response_model=PreviewResponse)

@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>qdrant-ingester UI</title>
+  <style>
+    :root {
+      --bg: #111110;
+      --panel: #181817;
+      --panel-2: #1f1f1d;
+      --text: #e7e5df;
+      --muted: #9c9a95;
+      --border: #2a2a28;
+      --primary: #4f98a3;
+      --primary-2: #2c737d;
+      --success: #6daa45;
+      --error: #d163a7;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    p.lead { margin: 0 0 24px; color: var(--muted); }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .full { grid-column: 1 / -1; }
+    label {
+      display: block;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    input, select, textarea, button {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 12px 14px;
+      font: inherit;
+    }
+    textarea { min-height: 110px; resize: vertical; }
+    .mode {
+      display: flex;
+      gap: 8px;
+    }
+    .mode button {
+      flex: 1;
+      cursor: pointer;
+    }
+    .mode button.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #091113;
+      font-weight: 600;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .actions button.primary {
+      background: var(--primary);
+      color: #091113;
+      border-color: var(--primary);
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .muted { color: var(--muted); }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      margin-bottom: 12px;
+    }
+    .ok { color: var(--success); }
+    .bad { color: var(--error); }
+    .result pre, .chunk {
+      background: #0d0d0c;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .chunk {
+      margin-top: 10px;
+    }
+    .chunk-head {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    @media (max-width: 720px) {
+      .grid { grid-template-columns: 1fr; }
+      .mode, .actions { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>qdrant-ingester UI</h1>
+    <p class="lead">Collection → file → preview or ingest → report.</p>
+
+    <div class="card">
+      <div id="health" class="status">Checking health…</div>
+
+      <div class="grid">
+        <div class="full">
+          <label for="apiUrl">API URL</label>
+          <input id="apiUrl" value="http://localhost:8002" />
+        </div>
+
+        <div class="full">
+          <label for="apiKey">X-API-Key</label>
+          <input id="apiKey" type="password" placeholder="service API key" />
+        </div>
+
+        <div>
+          <label for="collection">Collection</label>
+          <select id="collection">
+            <option value="">— select —</option>
+            <option value="documents">documents</option>
+          </select>
+        </div>
+
+        <div>
+          <label for="fileName">File</label>
+          <select id="fileName" disabled>
+            <option value="">— select collection first —</option>
+          </select>
+        </div>
+
+        <div class="full">
+          <label>Mode</label>
+          <div class="mode">
+            <button id="previewMode" class="active" type="button">Preview chunks</button>
+            <button id="ingestMode" type="button">Ingest now</button>
+          </div>
+        </div>
+
+        <div>
+          <label for="chunkSize">Chunk size</label>
+          <input id="chunkSize" type="number" placeholder="512" />
+        </div>
+
+        <div>
+          <label for="overlap">Overlap</label>
+          <input id="overlap" type="number" placeholder="1" />
+        </div>
+
+        <div class="full" id="extraPayloadWrap" style="display:none">
+          <label for="extraPayload">Extra payload (JSON)</label>
+          <textarea id="extraPayload" placeholder='{"source":"internal"}'></textarea>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="runBtn" class="primary" type="button">Run</button>
+        <button id="refreshFilesBtn" type="button">Refresh files</button>
+      </div>
+    </div>
+
+    <div class="card result">
+      <div id="result">No result yet.</div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">Chunks</h3>
+      <div id="chunks" class="muted">Run preview to inspect chunks.</div>
+    </div>
+  </div>
+
+  <script>
+    const el = {
+      apiUrl: document.getElementById('apiUrl'),
+      apiKey: document.getElementById('apiKey'),
+      collection: document.getElementById('collection'),
+      fileName: document.getElementById('fileName'),
+      previewMode: document.getElementById('previewMode'),
+      ingestMode: document.getElementById('ingestMode'),
+      chunkSize: document.getElementById('chunkSize'),
+      overlap: document.getElementById('overlap'),
+      extraPayload: document.getElementById('extraPayload'),
+      extraPayloadWrap: document.getElementById('extraPayloadWrap'),
+      runBtn: document.getElementById('runBtn'),
+      refreshFilesBtn: document.getElementById('refreshFilesBtn'),
+      result: document.getElementById('result'),
+      chunks: document.getElementById('chunks'),
+      health: document.getElementById('health'),
+    };
+
+    let mode = 'preview';
+
+    function headers() {
+      const h = { 'Content-Type': 'application/json' };
+      if (el.apiKey.value.trim()) h['X-API-Key'] = el.apiKey.value.trim();
+      return h;
+    }
+
+    function setMode(next) {
+      mode = next;
+      el.previewMode.classList.toggle('active', next === 'preview');
+      el.ingestMode.classList.toggle('active', next === 'ingest');
+      el.extraPayloadWrap.style.display = next === 'ingest' ? 'block' : 'none';
+      el.chunks.innerHTML = next === 'preview'
+        ? '<span class="muted">Run preview to inspect chunks.</span>'
+        : '<span class="muted">Chunks are shown only in preview mode.</span>';
+    }
+
+    async function checkHealth() {
+      try {
+        const res = await fetch(el.apiUrl.value.replace(/\/$/, '') + '/health', {
+          headers: headers(),
+        });
+        if (!res.ok) throw new Error();
+        el.health.className = 'status ok';
+        el.health.textContent = 'Service is online';
+      } catch {
+        el.health.className = 'status bad';
+        el.health.textContent = 'Service is unreachable';
+      }
+    }
+
+    async function loadFiles() {
+      const collection = el.collection.value;
+      if (!collection) return;
+
+      el.fileName.disabled = true;
+      el.fileName.innerHTML = '<option>Loading…</option>';
+
+      try {
+        const res = await fetch(
+          el.apiUrl.value.replace(/\/$/, '') + '/files/' + encodeURIComponent(collection),
+          { headers: headers() }
+        );
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Failed to load files');
+
+        el.fileName.innerHTML = '<option value="">— select file —</option>';
+        for (const file of data.files) {
+          const opt = document.createElement('option');
+          opt.value = file.path;
+          opt.textContent = `${file.path} (${file.size_kb} KB)`;
+          el.fileName.appendChild(opt);
+        }
+        el.fileName.disabled = false;
+      } catch (err) {
+        el.fileName.innerHTML = '<option value="">Failed to load files</option>';
+        el.result.innerHTML = `<span class="bad">${String(err.message || err)}</span>`;
+      }
+    }
+
+    async function run() {
+      const collection = el.collection.value;
+      const file_name = el.fileName.value;
+      if (!collection || !file_name) {
+        el.result.innerHTML = '<span class="bad">Select collection and file first.</span>';
+        return;
+      }
+
+      const body = {
+        collection,
+        file_name,
+      };
+
+      if (el.chunkSize.value) body.chunk_size = parseInt(el.chunkSize.value, 10);
+      if (el.overlap.value) body.overlap = parseInt(el.overlap.value, 10);
+
+      if (mode === 'ingest' && el.extraPayload.value.trim()) {
+        try {
+          body.extra_payload = JSON.parse(el.extraPayload.value);
+        } catch {
+          el.result.innerHTML = '<span class="bad">extra_payload must be valid JSON.</span>';
+          return;
+        }
+      }
+
+      const endpoint = mode === 'preview' ? '/preview' : '/ingest';
+      el.runBtn.disabled = true;
+      el.runBtn.textContent = mode === 'preview' ? 'Previewing…' : 'Ingesting…';
+      el.result.textContent = 'Running…';
+
+      try {
+        const res = await fetch(el.apiUrl.value.replace(/\/$/, '') + endpoint, {
+          method: 'POST',
+          headers: headers(),
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Request failed');
+
+        if (mode === 'preview') {
+          el.result.innerHTML = `
+            <div><strong>Preview ready</strong></div>
+            <div class="muted">File: ${data.file_name}</div>
+            <div class="muted">Format: ${data.file_format}</div>
+            <div class="muted">Chunks: ${data.chunks_total}</div>
+          `;
+          el.chunks.innerHTML = data.chunks.map(chunk => `
+            <div class="chunk">
+              <div class="chunk-head">
+                <span>#${chunk.index + 1}</span>
+                <span>${chunk.word_count} words · ${chunk.char_count} chars</span>
+              </div>
+              <div>${escapeHtml(chunk.raw)}</div>
+            </div>
+          `).join('');
+        } else {
+          el.result.innerHTML = `
+            <div><strong>Ingest complete</strong></div>
+            <div class="muted">File: ${data.file_name}</div>
+            <div class="muted">Status: ${data.status}</div>
+            <div class="muted">Chunks total: ${data.chunks_total}</div>
+            <div class="muted">Upserted: ${data.chunks_upserted}</div>
+            <div class="muted">Failed: ${data.chunks_failed}</div>
+            ${data.message ? `<div class="bad">${escapeHtml(data.message)}</div>` : ''}
+          `;
+          el.chunks.innerHTML = '<span class="muted">Run preview mode to inspect chunks.</span>';
+        }
+      } catch (err) {
+        el.result.innerHTML = `<span class="bad">${escapeHtml(String(err.message || err))}</span>`;
+      } finally {
+        el.runBtn.disabled = false;
+        el.runBtn.textContent = 'Run';
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+    }
+
+    el.previewMode.addEventListener('click', () => setMode('preview'));
+    el.ingestMode.addEventListener('click', () => setMode('ingest'));
+    el.collection.addEventListener('change', loadFiles);
+    el.refreshFilesBtn.addEventListener('click', loadFiles);
+    el.runBtn.addEventListener('click', run);
+
+    checkHealth();
+    setMode('preview');
+  </script>
+</body>
+</html>
