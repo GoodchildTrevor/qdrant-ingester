@@ -180,6 +180,13 @@ async def ingest(
     request: IngestRequest,
     _: None = Depends(require_api_key),
 ):
+    """
+    Ingest a document into Qdrant.
+    :param request: IngestRequest
+    :return: IngestResponse
+    :raises HTTPException: if the request is invalid
+    :raises Exception: if the ingestion fails
+    """
     settings = get_settings()
     require_allowed_collection(request.collection, settings)
     client = get_qdrant_client()
@@ -189,11 +196,9 @@ async def ingest(
     chunk_size = request.chunk_size or settings.chunk_size
     overlap = request.overlap or settings.overlap
 
-    # Build file_path from collection + file_name
     allowed_root = Path(settings.ingest_root).resolve()
     file_path = (allowed_root / request.collection / request.file_name).resolve()
 
-    # Path guard: ensure resolved path is under ingest_root
     if not file_path.is_relative_to(allowed_root):
         logger.warning(
             "Rejected path %r: not under ingest_root=%r (collection=%r, file_name=%r)",
@@ -239,7 +244,6 @@ async def ingest(
             failed_batches=[],
         )
 
-    # --- inline_threshold check: return raw text if document is small enough ---
     if request.inline_threshold is not None:
         full_text = "\n\n".join(ch.raw for ch in chunk_resp.chunks)
         token_count = len(full_text.split())
@@ -333,6 +337,13 @@ async def ingest(
 
 
 def _scan_files_bounded(root: Path, limit: int = 200_000) -> set[Path]:
+    """
+    Scan files under the root directory and return a set of paths.
+    :param root: the root directory to scan
+    :param limit: the maximum number of files to scan
+    :return: a set of paths
+    :raises RuntimeError: if the scan limit is exceeded
+    """
     out = set()
     for i, p in enumerate(root.rglob("*"), start=1):
         if p.is_file():
@@ -347,6 +358,13 @@ SYNC_CACHE_TTL_SECONDS = 30
 SYNC_SCAN_TIMEOUT_SECONDS = 60
 
 async def get_current_paths_cached(root: Path) -> set[Path]:
+    """
+    Get the current paths from the cache.
+    :param root: the root directory to scan
+    :return: a set of paths
+    :raises TimeoutError: if the scan timeout is exceeded
+    :raises RuntimeError: if the scan limit is exceeded
+    """
     now = time.time()
     if now - float(_sync_cache["ts"]) <= SYNC_CACHE_TTL_SECONDS:
         return set(_sync_cache["paths"])
@@ -370,6 +388,13 @@ async def list_files(
     collection: str,
     _: None = Depends(require_api_key),
 ):
+    """
+    List files in a collection.
+    :param collection: the collection to list files from
+    :return: a dictionary with the collection and files
+    :raises HTTPException: if the collection is not allowed
+    :raises Exception: if the listing fails
+    """
     settings = get_settings()
     require_allowed_collection(collection, settings)
 
@@ -395,6 +420,15 @@ async def sync(
     request: SyncRequest,
     _ : None = Depends(require_api_key),
 ):
+    """
+    Sync the filesystem with Qdrant.
+    :param request: SyncRequest
+    :return: SyncResponse
+    :raises HTTPException: if the request is invalid
+    :raises Exception: if the sync fails
+    :raises TimeoutError: if the sync timeout is exceeded
+    :raises RuntimeError: if the sync limit is exceeded
+    """
     settings = get_settings()
     require_allowed_collection(request.collection, settings)
     client = get_qdrant_client()
@@ -455,6 +489,15 @@ async def preview(
     request: PreviewRequest,
     _: None = Depends(require_api_key),
 ):
+    """
+    Preview a file.
+    :param request: PreviewRequest
+    :return: PreviewResponse
+    :raises HTTPException: if the request is invalid
+    :raises Exception: if the preview fails
+    :raises TimeoutError: if the preview timeout is exceeded
+    :raises RuntimeError: if the preview limit is exceeded
+    """
     settings = get_settings()
     require_allowed_collection(request.collection, settings)
 
