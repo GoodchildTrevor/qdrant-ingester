@@ -4,6 +4,7 @@ services:
     container_name: qdrant_ingester
     restart: unless-stopped
     environment:
+      HF_TOKEN: ${HF_TOKEN}
       API_KEY: ${API_KEY:?API_KEY is required}
       DOCUMENT_CHUNKER_URL: ${DOCUMENT_CHUNKER_URL:?DOCUMENT_CHUNKER_URL is required}
       QDRANT_HOST: ${QDRANT_HOST:?QDRANT_HOST is required}
@@ -16,18 +17,22 @@ services:
       SCROLL_LIMIT: ${SCROLL_LIMIT:-1000}
       CHUNK_SIZE: ${CHUNK_SIZE:-512}
       OVERLAP: ${OVERLAP:-1}
+    networks:
+      - dialogue_agent_network
     depends_on:
-      qdrant:
-        condition: service_healthy
+      - qdrant
+    volumes:
+      - fastembed_cache:/tmp/fastembed_cache
+      - uploads_data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8002/health\")'"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
 
   qdrant:
-    image: qdrant/qdrant:1.17.1
+    image: qdrant/qdrant:latest
     container_name: qdrant
     restart: unless-stopped
     environment:
@@ -36,18 +41,16 @@ services:
       - "6333"
     volumes:
       - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+    networks:
+      - dialogue_agent_network
 
   test:
     build:
       context: .
       dockerfile: Dockerfile.test
     container_name: qdrant_ingester_test
+    networks:
+      - dialogue_agent_network
     environment:
       API_KEY: ${API_KEY:?API_KEY is required}
       DOCUMENT_CHUNKER_URL: ${DOCUMENT_CHUNKER_URL:?DOCUMENT_CHUNKER_URL is required}
@@ -69,3 +72,64 @@ services:
 
 volumes:
   qdrant_data:
+  fastembed_cache:
+    external: true
+    name: dialogue-agent_fastembed_cache
+  uploads_data:
+    external: true
+    name: dialogue-agent_file_storage
+
+networks:
+  dialogue_agent_network:
+    external: true
+
+
+# services:
+#   qdrant-ingester:
+#     build: .
+#     container_name: qdrant_ingester
+#     restart: unless-stopped
+#     environment:
+#       API_KEY: ${API_KEY:?API_KEY is required}
+#       DOCUMENT_CHUNKER_URL: ${DOCUMENT_CHUNKER_URL:?DOCUMENT_CHUNKER_URL is required}
+#       QDRANT_HOST: ${QDRANT_HOST:?QDRANT_HOST is required}
+#       QDRANT_PORT: ${QDRANT_PORT:-6333}
+#       QDRANT_API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY is required}
+#       DENSE_MODEL_NAME: ${DENSE_MODEL_NAME:-sentence-transformers/paraphrase-multilingual-mpnet-base-v2}
+#       SPARSE_MODEL_NAME: ${SPARSE_MODEL_NAME:-Qdrant/bm25}
+#       BATCH_SIZE: ${BATCH_SIZE:-16}
+#       UPSERT_BATCH_SIZE: ${UPSERT_BATCH_SIZE:-16}
+#       SCROLL_LIMIT: ${SCROLL_LIMIT:-1000}
+#       CHUNK_SIZE: ${CHUNK_SIZE:-512}
+#       OVERLAP: ${OVERLAP:-1}
+#     networks:
+#       - dialogue_agent_network
+#     depends_on:
+#       - qdrant
+#     healthcheck:
+#       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+#       interval: 30s
+#       timeout: 5s
+#       retries: 3
+#       start_period: 20s
+
+#   qdrant:
+#     image: qdrant/qdrant:latest
+#     container_name: qdrant
+#     restart: unless-stopped
+#     environment:
+#       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY is required}
+#     # Only expose Qdrant to the Docker network (do not publish to host by default)
+#     expose:
+#       - "6333"
+#     volumes:
+#       - qdrant_data:/qdrant/storage
+#     networks:
+#       - dialogue_agent_network
+
+# volumes:
+#   qdrant_data:
+
+# networks:
+#   dialogue_agent_network:
+#     external: true
