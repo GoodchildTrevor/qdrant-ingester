@@ -1,11 +1,15 @@
+import asyncio
+import json
 import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated, List
+import httpx
 
-from fastembed import TextEmbedding, SparseTextEmbedding
+from fastembed import SparseTextEmbedding
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, NoDecode
 from qdrant_client import AsyncQdrantClient
 
 
@@ -24,20 +28,24 @@ class Settings(BaseSettings):
         default=False,
         description="Whether to use HTTPS for Qdrant connection (default: False for internal Docker networking)",
     )
+    ollama_base_url: str = Field(
+        default="http://ollama:11434",
+        description="Ollama server base URL (e.g., http://localhost:11434)",
+    )
     dense_model_name: str = Field(
-        default="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
-        description="fastembed dense model name",
+        default="bge-m3",
+        description="Ollama dense embedding model name",
     )
     sparse_model_name: str = Field(
         default="Qdrant/bm25",
         description="fastembed sparse (BM25) model name",
     )
     batch_size: int = Field(
-        default=16,
+        default=64,
         description="Embedding batch size",
     )
     upsert_batch_size: int = Field(
-        default=16,
+        default=64,
         description="Qdrant upsert batch size",
     )
     scroll_limit: int = Field(
@@ -53,7 +61,7 @@ class Settings(BaseSettings):
         description="overlap forwarded to document-chunker",
     )
     max_file_size_mb: int = Field(
-        default=200,
+        default=20000,
         ge=1,
         description="Maximum allowed file size for ingest in megabytes",
     )
@@ -104,10 +112,28 @@ class Settings(BaseSettings):
     dense_vector_config: str = "dense"
     sparse_vector_config: str = "sparse"
 
-    allowed_collections: tuple[str, ...] = Field(
+    # NoDecode: pass the raw env string to the validators below instead of
+    # letting pydantic-settings json.loads() it (which fails for
+    # "documents,erp_code" and even the plain default "documents").
+    allowed_collections: Annotated[tuple[str, ...], NoDecode] = Field(
         default=("documents",),
         description="Collections allowed for ingest/sync operations",
     )
+
+    @field_validator("allowed_collections", mode="before")
+    @classmethod
+    def _split_allowed_collections(cls, v):
+        """Accept plain env values like ALLOWED_COLLECTIONS=documents,erp_code."""
+        if isinstance(v, str):
+            stripped = v.strip()
+            if stripped.startswith("["):
+                try:
+                    v = json.loads(stripped)
+                except json.JSONDecodeError:
+                    v = [item.strip() for item in stripped.split(",")]
+            else:
+                v = [item.strip() for item in stripped.split(",") if item.strip()]
+        return v
 
     @field_validator("allowed_collections")
     @classmethod
@@ -137,6 +163,55 @@ class Settings(BaseSettings):
     }
 
 
+class OllamaDenseEmbedding:
+    """Dense embeddings via Ollama's /api/embed endpoint (batch-capable)."""
+
+    def __init__(self, base_url: str, model_name: str, api_key: str | None = None):
+        self.base_url = base_url.rstrip("/")
+        self.model_name = model_name
+        self._api_key = api_key
+        self._client: httpx.AsyncClient | None = None
+
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            headers = {}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url,
+                headers=headers,
+                timeout=httpx.Timeout(60.0),
+            )
+        return self._client
+
+
+    async def embed(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        client = await self._get_client()
+        last_exc = None
+        for attempt in range(3):
+            try:
+                resp = await client.post("/api/embed", json={"model": self.model_name, "input": texts})
+                resp.raise_for_status()
+                return resp.json()["embeddings"]
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                if exc.response.status_code == 404 and attempt < 2:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                raise
+        raise last_exc
+
+
+    async def close(self):
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+
+@lru_cache
 def get_settings() -> Settings:
     return Settings()
 
@@ -153,24 +228,33 @@ def get_qdrant_client() -> AsyncQdrantClient:
 
 
 @lru_cache
-def get_dense_model() -> TextEmbedding:
+def get_dense_model() -> OllamaDenseEmbedding:
     if os.getenv("FASTEMBED_FAKE_MODELS") == "1":
         return _DummyDenseEmbedding()
-    return TextEmbedding(model_name=get_settings().dense_model_name)
+    s = get_settings()
+    return OllamaDenseEmbedding(
+        base_url=s.ollama_base_url,
+        model_name=s.dense_model_name,
+    )
 
 
 @lru_cache
 def get_sparse_model() -> SparseTextEmbedding:
     if os.getenv("FASTEMBED_FAKE_MODELS") == "1":
         return _DummySparseEmbedding()
-    return SparseTextEmbedding(model_name=get_settings().sparse_model_name)
+    s = get_settings()
+    return SparseTextEmbedding(
+        model_name=s.sparse_model_name,
+        specific_model_path="/app/resources/bm25",
+    )
 
 
 @dataclass
 class _DummyDenseEmbedding:
     dim: int = 8
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
         return [[len(text) * 1.0] * self.dim for text in texts]
 
 
