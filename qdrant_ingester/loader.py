@@ -7,15 +7,24 @@ from typing import Any
 
 from more_itertools import chunked
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import PointStruct
+from qdrant_client.models import FieldCondition, Filter, FilterSelector, HasIdCondition, MatchValue, PointStruct
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 logger = logging.getLogger(__name__)
 
+# Chunk meta keys that are mapped onto dedicated payload fields below.
+_MAPPED_META_KEYS = frozenset(
+    {"page_start", "page_end", "table_marker", "row_index", "tokens"}
+)
 
-def _make_point_id(file_path: str, index: int) -> str:
-    """Deterministic UUID derived from (file_path, chunk_index) for idempotency."""
-    digest = hashlib.sha1(f"{file_path}:{index}".encode()).digest()
+
+def _make_point_id(file_path: str, key: int | str) -> str:
+    """Deterministic UUID derived from (file_path, chunk key) for idempotency.
+
+    The key is the chunk index, or a stable chunk identifier (``chunk_id``
+    from pre-chunked JSONL exports) when the chunk metadata provides one.
+    """
+    digest = hashlib.sha1(f"{file_path}:{key}".encode()).digest()
     # Pad/truncate to 16 bytes and build a valid UUID
     return str(uuid.UUID(bytes=digest[:16]))
 
@@ -35,7 +44,7 @@ async def upsert_data(
 ) -> dict[str, Any]:
     """
     Upsert points into Qdrant in batches with:
-    - deterministic point ids derived from (file_path, chunk_index) for idempotency
+    - deterministic point ids derived from (file_path, chunk key) for idempotency
     - per-batch retries with exponential backoff
     - collection of final failed batches and simple error metrics
 
@@ -52,12 +61,12 @@ async def upsert_data(
     def point_generator():
         file_path = base_payload.get("file_path", "")
         for i, chunk in enumerate(chunks):
-            pid = _make_point_id(file_path, i)
+            meta = chunk.get("_meta") or chunk.get("meta") or {}
+            pid = _make_point_id(file_path, meta.get("chunk_id", i))
             vector_dict: dict[str, Any] = {
                 dense_vector_config: dense_embeddings[i],
                 sparse_vector_config: sparse_embeddings[i].as_object(),
             }
-            meta = chunk.get("_meta") or chunk.get("meta") or {}
             payload = {
                 **base_payload,
                 "document": chunk["raw"],
@@ -67,6 +76,13 @@ async def upsert_data(
                 "row_index": meta.get("row_index"),
                 "chunk_tokens": meta.get("tokens"),
             }
+            # Pass the remaining per-chunk metadata (e.g. fields from
+            # pre-chunked JSONL exports: procedure_name, kind, source_file, ...)
+            # through into the Qdrant payload. Keys already used by the
+            # payload itself keep their value.
+            for key, value in meta.items():
+                if key not in _MAPPED_META_KEYS and key not in payload:
+                    payload[key] = value
             payload = {k: v for k, v in payload.items() if v is not None}
             yield PointStruct(id=pid, vector=vector_dict, payload=payload)
 
@@ -112,6 +128,28 @@ async def upsert_data(
                             "ids": [p.id for p in batch_list],
                         }
                     )
+    if upserted:
+        # Re-ingesting a file that now yields fewer chunks must not leave the
+        # old higher-index points behind: drop every point of this file whose
+        # id is not part of the new set.
+        file_path = base_payload.get("file_path", "")
+        new_ids = [
+            _make_point_id(
+                file_path,
+                (chunk.get("_meta") or chunk.get("meta") or {}).get("chunk_id", index),
+            )
+            for index, chunk in enumerate(chunks)
+        ]
+        await client.delete(
+            collection_name=collection_name,
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[FieldCondition(key="file_path", match=MatchValue(value=file_path))],
+                    must_not=[HasIdCondition(has_id=new_ids)],
+                )
+            ),
+            wait=True,
+        )
     logger.info(
         "Upsert summary for '%s': total=%d upserted=%d failed=%d",
         collection_name,

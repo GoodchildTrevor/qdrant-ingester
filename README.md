@@ -145,7 +145,8 @@ Returns `{"status": "ok"}`.
 | `ALLOWED_COLLECTIONS` | `documents` | Comma-separated list of valid collection names |
 | `CHUNK_SIZE` | `512` | Default chunk size forwarded to document-chunker |
 | `OVERLAP` | `1` | Default overlap forwarded to document-chunker |
-| `DENSE_MODEL_NAME` | `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` | fastembed dense model |
+| `DENSE_MODEL_NAME` | `bge-m3` | Ollama dense embedding model (must exist on the Ollama server) |
+| `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama server base URL |
 | `SPARSE_MODEL_NAME` | `Qdrant/bm25` | fastembed sparse model |
 | `BATCH_SIZE` | `16` | Embedding batch size |
 | `UPSERT_BATCH_SIZE` | `16` | Qdrant upsert batch size |
@@ -168,7 +169,7 @@ Returns `{"status": "ok"}`.
 
 ## Implementation notes
 
-- **Idempotency** — point IDs are derived deterministically from `file_path` + chunk index, so retrying an ingest will upsert (not duplicate) existing points.
+- **Idempotency** — point IDs are derived deterministically from `file_path` + chunk index, so retrying an ingest will upsert (not duplicate) existing points. Re-ingesting a changed file also deletes the points of the previous version that the new version no longer produces.
 - **Upsert resilience** — batches are retried with backoff; per-batch failures are reported in `failed_batches` without aborting the whole request.
 - **Sync safety** — filesystem scans are bounded (200k file limit), run in a thread pool, TTL-cached for 30 s, and timeout-protected at 60 s.
 - **Token counting** — inline threshold uses a fast whitespace-split approximation (`len(text.split())`), not a tokenizer. Suitable for rough gating; do not rely on it for exact context-window management.

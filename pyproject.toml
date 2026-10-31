@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qdrant-ingester"
-version = "0.1.0"
+version = "0.2.0"
 description = "FastAPI service: embed document chunks and upsert into Qdrant"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.29.0",
     "pydantic>=2.0",
-    "pydantic-settings>=2.0",
+    "pydantic-settings>=2.7",
     "httpx>=0.27.0",
     "qdrant-client>=1.9.0",
     "fastembed>=0.3.0",
@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "httpx", "respx>=0.26.0", "pytest-cov", "pytest-mock"]
+dev = ["pytest", "pytest-asyncio", "httpx", "pytest-cov", "pytest-mock"]
 
 [tool.setuptools.packages.find]
 where = ["."]

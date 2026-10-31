@@ -1,14 +1,18 @@
+import json
 import logging
+import os
 import secrets
 import asyncio
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Security, UploadFile
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     Distance,
     VectorParams,
@@ -29,7 +33,12 @@ from qdrant_ingester.schemas import (
     PreviewRequest, PreviewResponse, ChunkPreview,
 )
 from qdrant_ingester.chunker_client import fetch_chunks
-from qdrant_ingester.embedder import embed_texts
+from qdrant_ingester.prechunked import (
+    PrechunkedParseError,
+    is_prechunked,
+    parse_prechunked_file,
+)
+from qdrant_ingester.embedder import _embed_batch, embed_texts
 from qdrant_ingester.loader import upsert_data, sync_file_paths, delete_orphaned_chunks
 
 logger = logging.getLogger(__name__)
@@ -45,8 +54,8 @@ _DENSE_DIMS: dict[str, int] = {
     "intfloat/multilingual-e5-base": 768,
     "sentence-transformers/paraphrase-multilingual-mpnet-base-v2": 768,
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": 384,
+    "bge-m3": 1024,
 }
-_DENSE_DIMS_DEFAULT = 768
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -87,10 +96,46 @@ def setup_logging(settings: Settings) -> None:
             logger.debug("Debug log file: %s", settings.debug_log_file)
 
 
+async def _create_collection(
+    client: AsyncQdrantClient, settings: Settings, collection: str
+) -> None:
+    dense_dim = _DENSE_DIMS.get(settings.dense_model_name)
+    if dense_dim is None:
+        # Unknown model: ask the embedder for its real output size instead of
+        # guessing, otherwise every upsert into the new collection fails.
+        probe = await _embed_batch(get_dense_model(), ["dimension probe"])
+        dense_dim = len(probe[0])
+    await client.create_collection(
+        collection_name=collection,
+        vectors_config={settings.dense_vector_config: VectorParams(
+            size=dense_dim,
+            distance=Distance.COSINE,
+        )},
+        sparse_vectors_config={settings.sparse_vector_config: SparseVectorParams(
+            index=SparseIndexParams(on_disk=False),
+        )},
+    )
+    logger.info(
+        "Created collection '%s' (dense_dim=%d, dense='%s', sparse='%s').",
+        collection, dense_dim,
+        settings.dense_vector_config,
+        settings.sparse_vector_config,
+    )
+
+
+async def _ensure_collection(
+    client: AsyncQdrantClient, settings: Settings, collection: str
+) -> None:
+    """Create the collection in Qdrant if it does not exist yet."""
+    existing = {c.name for c in (await client.get_collections()).collections}
+    if collection in existing:
+        return
+    await _create_collection(client, settings, collection)
+
+
 async def ensure_collections(settings: Settings) -> None:
     """Create all allowed_collections in Qdrant if they do not already exist."""
     client = get_qdrant_client()
-    dense_dim = _DENSE_DIMS.get(settings.dense_model_name, _DENSE_DIMS_DEFAULT)
 
     existing = {c.name for c in (await client.get_collections()).collections}
 
@@ -98,22 +143,7 @@ async def ensure_collections(settings: Settings) -> None:
         if collection in existing:
             logger.info("Collection '%s' already exists, skipping creation.", collection)
             continue
-        await client.create_collection(
-            collection_name=collection,
-            vectors_config={settings.dense_vector_config: VectorParams(
-                size=dense_dim,
-                distance=Distance.COSINE,
-            )},
-            sparse_vectors_config={settings.sparse_vector_config: SparseVectorParams(
-                index=SparseIndexParams(on_disk=False),
-            )},
-        )
-        logger.info(
-            "Created collection '%s' (dense_dim=%d, dense='%s', sparse='%s').",
-            collection, dense_dim,
-            settings.dense_vector_config,
-            settings.sparse_vector_config,
-        )
+        await _create_collection(client, settings, collection)
 
 
 @asynccontextmanager
@@ -127,7 +157,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="qdrant-ingester", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="qdrant-ingester", version="0.2.0", lifespan=lifespan)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -135,7 +165,6 @@ def _error_detail(generic: str, exc: Exception, settings: Settings) -> str:
     if settings.debug_errors:
         return f"{generic}: {exc}"
     return generic
-
 
 
 @app.get("/health")
@@ -175,30 +204,22 @@ def require_allowed_collection(collection: str, settings: Settings) -> None:
         )
         raise HTTPException(status_code=403, detail="Collection is not allowed")
 
-@app.post("/ingest", response_model=IngestResponse)
-async def ingest(
-    request: IngestRequest,
-    _: None = Depends(require_api_key),
-):
+
+async def _ingest_file(settings: Settings, request: IngestRequest, file_path: Path) -> IngestResponse:
+    """Shared ingest pipeline used by /ingest and /ingest_upload.
+
+    The file must already exist at *file_path* (under INGEST_ROOT).
     """
-    Ingest a document into Qdrant.
-    :param request: IngestRequest
-    :return: IngestResponse
-    :raises HTTPException: if the request is invalid
-    :raises Exception: if the ingestion fails
-    """
-    settings = get_settings()
-    require_allowed_collection(request.collection, settings)
+    # Validate extra_payload keys early, before any external calls (chunker, embedder, Qdrant),
+    # so a rejected request never depends on how many chunks the document happens to produce.
+    _merge_payload({}, request.extra_payload)
+
     client = get_qdrant_client()
     dense_model = get_dense_model()
     sparse_model = get_sparse_model()
 
-    chunk_size = request.chunk_size or settings.chunk_size
-    overlap = request.overlap or settings.overlap
-
+    # Path guard: ensure resolved path is under ingest_root
     allowed_root = Path(settings.ingest_root).resolve()
-    file_path = (allowed_root / request.collection / request.file_name).resolve()
-
     if not file_path.is_relative_to(allowed_root):
         logger.warning(
             "Rejected path %r: not under ingest_root=%r (collection=%r, file_name=%r)",
@@ -219,16 +240,30 @@ async def ingest(
     if not getattr(settings, "disable_file_size_limit", False) and size_mb is not None and size_mb > settings.max_file_size_mb:
         raise HTTPException(status_code=413, detail=f"File too large ({size_mb:.1f} MB)")
 
-    try:
-        chunk_resp = await fetch_chunks(
-            chunker_url=settings.document_chunker_url,
-            file_path=file_path,
-            chunk_size=chunk_size,
-            overlap=overlap,
-        )
-    except Exception as e:
-        logger.exception("Chunker call failed for %s", file_path)
-        raise HTTPException(status_code=502, detail=_error_detail("document-chunker error", e, settings))
+    # --- obtain chunks ----------------------------------------------------
+    # Pre-chunked JSON/JSONL files are parsed locally, document-chunker is skipped.
+    prechunked_flag = is_prechunked(file_path, request.prechunked)
+    if prechunked_flag:
+        logger.info("Ingesting pre-chunked file %s (document-chunker skipped)", file_path)
+        try:
+            chunk_resp = parse_prechunked_file(file_path)
+        except PrechunkedParseError as e:
+            logger.warning("Invalid pre-chunked file %s: %s", file_path, e)
+            raise HTTPException(status_code=422, detail=f"invalid pre-chunked file: {e}")
+    else:
+        # Explicit "is None" checks: an overlap of 0 is a valid request value.
+        chunk_size = request.chunk_size if request.chunk_size is not None else settings.chunk_size
+        overlap = request.overlap if request.overlap is not None else settings.overlap
+        try:
+            chunk_resp = await fetch_chunks(
+                chunker_url=settings.document_chunker_url,
+                file_path=file_path,
+                chunk_size=chunk_size,
+                overlap=overlap,
+            )
+        except Exception as e:
+            logger.exception("Chunker call failed for %s", file_path)
+            raise HTTPException(status_code=502, detail=_error_detail("document-chunker error", e, settings))
 
     if not chunk_resp.chunks:
         logger.warning("No chunks returned for %s, skipping upsert.", file_path)
@@ -242,6 +277,7 @@ async def ingest(
             chunks_upserted=0,
             chunks_failed=0,
             failed_batches=[],
+            prechunked=prechunked_flag,
         )
 
     if request.inline_threshold is not None:
@@ -264,6 +300,7 @@ async def ingest(
                 failed_batches=[],
                 token_count=token_count,
                 inline_text=full_text,
+                prechunked=prechunked_flag,
             )
     else:
         token_count = None
@@ -292,6 +329,14 @@ async def ingest(
         "modification_date": chunk_resp.modification_date,
     }
     base_payload = _merge_payload(base_payload, request.extra_payload)
+
+    # Make sure the target collection exists (it may be missing, e.g. when it
+    # was added to ALLOWED_COLLECTIONS or removed from Qdrant manually).
+    try:
+        await _ensure_collection(client, settings, request.collection)
+    except Exception as e:
+        logger.exception("Failed to ensure collection '%s'", request.collection)
+        raise HTTPException(status_code=500, detail=_error_detail("Qdrant collection error", e, settings))
 
     try:
         metrics = await upsert_data(
@@ -333,7 +378,105 @@ async def ingest(
         failed_batches=failed_batches,
         token_count=token_count,
         inline_text=None,
+        prechunked=prechunked_flag,
     )
+
+
+@app.post("/ingest", response_model=IngestResponse)
+async def ingest(
+    request: IngestRequest,
+    _: None = Depends(require_api_key),
+):
+    settings = get_settings()
+    require_allowed_collection(request.collection, settings)
+
+    # Build file_path from collection + file_name
+    allowed_root = Path(settings.ingest_root).resolve()
+    file_path = (allowed_root / request.collection / request.file_name).resolve()
+
+    return await _ingest_file(settings, request, file_path)
+
+
+@app.post("/ingest_upload", response_model=IngestResponse)
+async def ingest_upload(
+    file: UploadFile = File(..., description="Document or pre-chunked JSON/JSONL file"),
+    collection: str = Form(...),
+    prechunked: bool | None = Form(None),
+    extra_payload: str | None = Form(None),
+    inline_threshold: int | None = Form(None),
+    _: None = Depends(require_api_key),
+):
+    """Upload a file (multipart) and ingest it in one call.
+
+    The file is stored under INGEST_ROOT/<collection>/<file name> and the
+    standard pipeline runs afterwards (document-chunker, or local parsing
+    for pre-chunked JSON/JSONL, then embedding and upsert).
+    """
+    settings = get_settings()
+    require_allowed_collection(collection, settings)
+
+    if extra_payload is not None:
+        try:
+            parsed_extra = json.loads(extra_payload)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=422, detail=f"extra_payload is not valid JSON: {e}")
+        if not isinstance(parsed_extra, dict):
+            raise HTTPException(status_code=422, detail="extra_payload must be a JSON object")
+    else:
+        parsed_extra = {}
+
+    # Strip any directory components from the uploaded file name
+    safe_name = Path((file.filename or "").replace("\\", "/")).name
+    if not safe_name or safe_name in {".", ".."}:
+        raise HTTPException(status_code=422, detail="Invalid file name")
+
+    root = Path(settings.ingest_root).resolve()
+    dest_dir = root / collection
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = (dest_dir / safe_name).resolve()
+    if not dest.is_relative_to(root):
+        raise HTTPException(status_code=403, detail="path not allowed")
+
+    max_bytes = settings.max_file_size_mb * 1024 * 1024
+    disable_limit = getattr(settings, "disable_file_size_limit", False)
+    # Write to a temporary sibling and rename at the end: a failed or a
+    # concurrent upload must never truncate or corrupt the stored document.
+    tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.part")
+    try:
+        with open(tmp, "wb") as out:
+            while True:
+                block = await file.read(1024 * 1024)
+                if not block:
+                    break
+                out.write(block)
+                if not disable_limit and out.tell() > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large (> {settings.max_file_size_mb} MB)",
+                    )
+        os.replace(tmp, dest)
+    except HTTPException:
+        tmp.unlink(missing_ok=True)
+        raise
+    except OSError as e:
+        tmp.unlink(missing_ok=True)
+        logger.exception("Failed to store uploaded file %s", dest)
+        raise HTTPException(status_code=500, detail=_error_detail("Failed to store uploaded file", e, settings))
+    finally:
+        await file.close()
+
+    logger.info("Stored uploaded file %r (%d bytes)", str(dest), dest.stat().st_size)
+    # The new file must be visible to the next /sync even inside the cache TTL.
+    _sync_cache["ts"] = 0.0
+
+    request = IngestRequest(
+        collection=collection,
+        file_name=safe_name,
+        prechunked=prechunked,
+        extra_payload=parsed_extra,
+        inline_threshold=inline_threshold,
+    )
+    return await _ingest_file(settings, request, dest)
 
 
 def _scan_files_bounded(root: Path, limit: int = 200_000) -> set[Path]:
@@ -384,12 +527,15 @@ async def get_current_paths_cached(root: Path) -> set[Path]:
 
 
 @app.get("/files/{collection}")
-async def list_files(
+def list_files(
     collection: str,
     _: None = Depends(require_api_key),
 ):
     """
     List files in a collection.
+
+    Deliberately a sync handler: FastAPI runs it in the thread pool, so the
+    directory walk does not block the event loop for other requests.
     :param collection: the collection to list files from
     :return: a dictionary with the collection and files
     :raises HTTPException: if the collection is not allowed
@@ -455,6 +601,15 @@ async def sync(
         logger.exception("Sync failed")
         raise HTTPException(status_code=500, detail=_error_detail("Sync error", e, settings))
 
+    # The scan covers all of INGEST_ROOT; only files inside this collection's
+    # directory are candidates for ingestion into this collection.
+    collection_dir = Path(allowed_root).resolve() / request.collection
+    new_paths = {p for p in new_paths if p.is_relative_to(collection_dir)}
+
+    # The path cache can be stale (TTL): never delete the points of a file
+    # that exists on disk right now.
+    deleted_paths = {p for p in deleted_paths if not Path(p).exists()}
+
     deleted_count = 0
     if deleted_paths:
         try:
@@ -511,12 +666,20 @@ async def preview(
     if not file_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
 
-    chunk_resp = await fetch_chunks(
-        chunker_url=settings.document_chunker_url,
-        file_path=file_path,
-        chunk_size=request.chunk_size or settings.chunk_size,
-        overlap=request.overlap or settings.overlap,
-    )
+    if is_prechunked(file_path, request.prechunked):
+        logger.info("Previewing pre-chunked file %s (document-chunker skipped)", file_path)
+        try:
+            chunk_resp = parse_prechunked_file(file_path)
+        except PrechunkedParseError as e:
+            logger.warning("Invalid pre-chunked file %s: %s", file_path, e)
+            raise HTTPException(status_code=422, detail=f"invalid pre-chunked file: {e}")
+    else:
+        chunk_resp = await fetch_chunks(
+            chunker_url=settings.document_chunker_url,
+            file_path=file_path,
+            chunk_size=request.chunk_size if request.chunk_size is not None else settings.chunk_size,
+            overlap=request.overlap if request.overlap is not None else settings.overlap,
+        )
 
     return PreviewResponse(
         collection=request.collection,

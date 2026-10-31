@@ -12,6 +12,17 @@ class DummyModel:
         return [[len(text) * 1.0] for text in texts]
 
 
+class AsyncDummyModel:
+    """Mimics OllamaDenseEmbedding: embed() is a coroutine function."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def embed(self, texts):
+        self.calls.append(list(texts))
+        return [[len(text) * 1.0] for text in texts]
+
+
 @pytest.mark.asyncio
 async def test_embed_texts_batches_correctly():
     dense = DummyModel()
@@ -63,3 +74,24 @@ async def test_embed_texts_single_item():
     assert len(dense_embs) == 1
     assert dense_embs[0] == [5.0]
     assert len(dense.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_with_async_dense_model():
+    """Dense model with a coroutine embed() (OllamaDenseEmbedding path)."""
+    dense = AsyncDummyModel()
+    sparse = DummyModel()
+    texts = ["alpha", "beta", "gamma"]
+
+    dense_embs, sparse_embs = await embed_texts(
+        texts=texts,
+        dense_model=dense,
+        sparse_model=sparse,
+        batch_size=2,
+    )
+
+    assert len(dense_embs) == 3
+    assert dense_embs[0] == [5.0]   # len("alpha") == 5
+    assert sparse_embs[1] == [4.0]  # len("beta") == 4
+    assert dense.calls[0] == ["alpha", "beta"]
+    assert dense.calls[1] == ["gamma"]
