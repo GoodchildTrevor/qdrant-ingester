@@ -47,6 +47,8 @@ async def upsert_data(
     - deterministic point ids derived from (file_path, chunk key) for idempotency
     - per-batch retries with exponential backoff
     - collection of final failed batches and simple error metrics
+    - removal of this file's points from a previous version, only when every
+      batch succeeded (a partial result keeps the old points for a retry)
 
     Returns a dict:
     {
@@ -128,10 +130,13 @@ async def upsert_data(
                             "ids": [p.id for p in batch_list],
                         }
                     )
-    if upserted:
+    if upserted and not failed_batches:
         # Re-ingesting a file that now yields fewer chunks must not leave the
         # old higher-index points behind: drop every point of this file whose
-        # id is not part of the new set.
+        # id is not part of the new set. Only after a complete success: with a
+        # failed batch the new version is incomplete, and if chunk ids change
+        # between versions the cleanup would remove the old points while the
+        # new ones never got written. The caller retries on "partial" instead.
         file_path = base_payload.get("file_path", "")
         new_ids = [
             _make_point_id(
